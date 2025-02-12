@@ -1,19 +1,16 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'package:collection/collection.dart';
-import 'package:devtools_app/src/config_specific/import_export/import_export.dart';
-import 'package:devtools_app/src/primitives/utils.dart';
-import 'package:devtools_app/src/service/service_manager.dart';
-import 'package:devtools_app/src/shared/globals.dart';
-import 'package:devtools_app/src/shared/notifications.dart';
+import 'package:devtools_app/devtools_app.dart';
+import 'package:devtools_app/src/shared/config_specific/import_export/import_export.dart';
+import 'package:devtools_app_shared/utils.dart';
 import 'package:devtools_test/devtools_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-void main() async {
-  test('Filename is sortable by time', () async {
-    final controller = ExportController();
+void main() {
+  test('Filename is sortable by time', () {
     final dates = [
       DateTime(1901, 2, 3, 4, 5, 6, 7),
       DateTime(1902, 1, 3, 4, 5, 6, 7),
@@ -25,28 +22,25 @@ void main() async {
     ];
 
     final sortedByTime = dates.sorted().map(
-          (t) => controller.generateFileName(
-            time: t,
-            type: ExportFileType.json,
-          ),
-        );
+      (t) =>
+          ExportController.generateFileName(time: t, type: ExportFileType.json),
+    );
 
-    final sortedByFileName = dates
-        .map(
-          (t) => controller.generateFileName(
-            time: t,
-            type: ExportFileType.json,
-          ),
-        )
-        .sorted();
+    final sortedByFileName =
+        dates
+            .map(
+              (t) => ExportController.generateFileName(
+                time: t,
+                type: ExportFileType.json,
+              ),
+            )
+            .sorted();
 
     expect(sortedByTime, sortedByFileName);
   });
 
-  test('Filename hours are 0 to 23', () async {
-    final controller = ExportController();
-
-    final filename = controller.generateFileName(
+  test('Filename hours are 0 to 23', () {
+    final filename = ExportController.generateFileName(
       time: DateTime(1901, 2, 3, 14, 5, 6, 7),
       type: ExportFileType.json,
     );
@@ -61,8 +55,8 @@ void main() async {
     setUp(() {
       notifications = NotificationService();
       importController = ImportController((_) {});
-      setGlobal(OfflineModeController, OfflineModeController());
-      setGlobal(ServiceConnectionManager, FakeServiceManager());
+      setGlobal(OfflineDataController, OfflineDataController());
+      setGlobal(ServiceConnectionManager, FakeServiceConnectionManager());
       setGlobal(NotificationService, notifications);
     });
 
@@ -76,9 +70,7 @@ void main() async {
       );
 
       await Future.delayed(
-        const Duration(
-          milliseconds: ImportController.repeatImportTimeBufferMs,
-        ),
+        const Duration(milliseconds: ImportController.repeatImportTimeBufferMs),
       );
       importController.importData(nonDevToolsFileJsonWithListData);
       expect(notifications.activeMessages.length, equals(2));
@@ -88,9 +80,7 @@ void main() async {
       );
 
       await Future.delayed(
-        const Duration(
-          milliseconds: ImportController.repeatImportTimeBufferMs,
-        ),
+        const Duration(milliseconds: ImportController.repeatImportTimeBufferMs),
       );
       importController.importData(devToolsFileJson);
       expect(notifications.activeMessages.length, equals(3));
@@ -105,19 +95,19 @@ void main() async {
 final nonDevToolsFileJson = DevToolsJsonFile(
   name: 'nonDevToolsFileJson',
   lastModifiedTime: DateTime.fromMicrosecondsSinceEpoch(1000),
-  data: <String, dynamic>{},
+  data: <String, Object?>{},
 );
 final nonDevToolsFileJsonWithListData = DevToolsJsonFile(
   name: 'nonDevToolsFileJsonWithListData',
   lastModifiedTime: DateTime.fromMicrosecondsSinceEpoch(1000),
-  data: <Map<String, dynamic>>[],
+  data: <Map<String, Object?>>[],
 );
 final devToolsFileJson = DevToolsJsonFile(
   name: 'devToolsFileJson',
   lastModifiedTime: DateTime.fromMicrosecondsSinceEpoch(2000),
-  data: <String, dynamic>{
+  data: <String, Object?>{
     'devToolsSnapshot': true,
     'activeScreenId': 'example',
-    'example': {'title': 'example custom tools'}
+    'example': {'title': 'example custom tools'},
   },
 );

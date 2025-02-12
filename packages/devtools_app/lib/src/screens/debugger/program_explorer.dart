@@ -1,37 +1,31 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'dart:async';
+
+import 'package:devtools_app_shared/ui.dart';
+import 'package:devtools_app_shared/utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:vm_service/vm_service.dart' hide Stack;
 
-import '../../primitives/auto_dispose_mixin.dart';
-import '../../primitives/utils.dart';
-import '../../shared/common_widgets.dart';
-import '../../shared/flex_split_column.dart';
 import '../../shared/globals.dart';
-import '../../shared/theme.dart';
-import '../../shared/tree.dart';
-import '../../shared/utils.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/colors.dart';
+import '../../shared/ui/common_widgets.dart';
+import '../../shared/ui/tree_view.dart';
 import 'program_explorer_controller.dart';
 import 'program_explorer_model.dart';
 
 const containerIcon = Icons.folder;
 const libraryIcon = Icons.insert_drive_file;
-const listItemHeight = 40.0;
 
-double get _programExplorerRowHeight => scaleByFontFactor(22.0);
-double get _selectedNodeTopSpacing => _programExplorerRowHeight * 3;
+double get _selectedNodeTopSpacing => defaultTreeViewRowHeight * 3;
 
 class _ProgramExplorerRow extends StatelessWidget {
-  const _ProgramExplorerRow({
-    required this.controller,
-    required this.node,
-    this.onTap,
-  });
+  const _ProgramExplorerRow({required this.node, this.onTap});
 
-  final ProgramExplorerController controller;
   final VMServiceObjectNode node;
   final VoidCallback? onTap;
 
@@ -50,25 +44,19 @@ class _ProgramExplorerRow extends StatelessWidget {
 
     return DevToolsTooltip(
       message: toolTip ?? node.name,
-      textStyle: theme.toolTipFixedFontStyle,
+      textStyle: theme.tooltipFixedFontStyle,
       child: InkWell(
         onTap: onTap,
         child: Row(
           children: [
-            ProgramStructureIcon(
-              object: node.object,
-            ),
+            ProgramStructureIcon(object: node.object),
             const SizedBox(width: densePadding),
             Flexible(
               child: Text(
                 text!,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: theme.fixedFontStyle.copyWith(
-                  color: node.isSelected
-                      ? Colors.white
-                      : theme.fixedFontStyle.color,
-                ),
+                style: theme.fixedFontStyle,
               ),
             ),
           ],
@@ -83,14 +71,12 @@ class _ProgramExplorerRow extends StatelessWidget {
       final clazz = node.object as ClassRef;
       toolTip = '${clazz.name}';
       if (clazz.typeParameters != null) {
-        toolTip +=
-            '<' + clazz.typeParameters!.map((e) => e.name).join(', ') + '>';
+        toolTip += '<${clazz.typeParameters!.map((e) => e.name).join(', ')}>';
       }
     } else if (node.object is Func) {
       final func = node.object as Func;
       final isInstanceMethod = func.owner is ClassRef;
       final subtext = _buildFunctionTypeText(
-        func.name,
         func.signature!,
         isInstanceMethod: isInstanceMethod,
       );
@@ -108,9 +94,9 @@ class _ProgramExplorerRow extends StatelessWidget {
   /// Builds a string representation of a field declaration.
   ///
   /// Examples:
-  ///   - final String
-  ///   - static const int
-  ///   - List<X0>
+  ///   - `final String`
+  ///   - `static const int`
+  ///   - `List<X0>`
   String _buildFieldTypeText(Field field) {
     final buffer = StringBuffer();
     if (field.isStatic!) {
@@ -131,12 +117,11 @@ class _ProgramExplorerRow extends StatelessWidget {
   /// Builds a string representation of a function signature
   ///
   /// Examples:
-  ///   - Foo<T>(T) -> dynamic
-  ///   - Bar(String, int) -> void
-  ///   - Baz(String, [int]) -> void
-  ///   - Faz(String, {String? bar, required int baz}) -> int
+  ///   - `Foo<T>(T) -> dynamic`
+  ///   - `Bar(String, int) -> void`
+  ///   - `Baz(String, [int]) -> void`
+  ///   - `Faz(String, {String? bar, required int baz}) -> int`
   String _buildFunctionTypeText(
-    String? functionName,
     InstanceRef signature, {
     bool isInstanceMethod = false,
   }) {
@@ -174,7 +159,7 @@ class _ProgramExplorerRow extends StatelessWidget {
       if (paramType != null) {
         final paramTypeName = param.parameterType?.name;
         if (paramTypeName == null) {
-          buffer.write(_buildFunctionTypeText('Function', paramType));
+          buffer.write(_buildFunctionTypeText(paramType));
         } else {
           buffer.write(paramTypeName);
         }
@@ -201,7 +186,7 @@ class _ProgramExplorerRow extends StatelessWidget {
     if (returnType != null) {
       final returnTypeName = signature.returnType?.name;
       if (returnTypeName == null) {
-        buffer.write(_buildFunctionTypeText('Function', returnType));
+        buffer.write(_buildFunctionTypeText(returnType));
       } else {
         buffer.write(returnTypeName);
       }
@@ -212,9 +197,7 @@ class _ProgramExplorerRow extends StatelessWidget {
 }
 
 class ProgramStructureIcon extends StatelessWidget {
-  const ProgramStructureIcon({
-    required this.object,
-  });
+  const ProgramStructureIcon({super.key, required this.object});
 
   final ObjRef? object;
 
@@ -260,40 +243,35 @@ class ProgramStructureIcon extends StatelessWidget {
       height: defaultIconSize,
       width: defaultIconSize,
       child: Container(
-        decoration: icon == null
-            ? BoxDecoration(
-                color: color,
-                shape: BoxShape.circle,
-              )
-            : null,
-        child: icon == null
-            ? Center(
-                child: Text(
-                  character!,
-                  style: TextStyle(
-                    height: 1,
-                    fontFamily: theme.fixedFontStyle.fontFamily,
-                    color: theme.colorScheme.defaultBackgroundColor,
-                    fontSize: chartFontSizeSmall,
+        decoration:
+            icon == null
+                ? BoxDecoration(color: color, shape: BoxShape.circle)
+                : null,
+        child:
+            icon == null
+                ? Center(
+                  child: Text(
+                    character!,
+                    style: TextStyle(
+                      height: 1,
+                      fontFamily: theme.fixedFontStyle.fontFamily,
+                      color: theme.colorScheme.defaultBackgroundColor,
+                      fontSize: smallFontSize,
+                    ),
+                    // Required to center the individual character within the
+                    // shape. Since letters like 'm' are shorter than letters
+                    // like 'f', there's padding applied to the top of shorter
+                    // characters in order for everything to align properly.
+                    // Since we're only dealing with individual characters, we
+                    // want to disable this behavior so shorter characters don't
+                    // appear to be slightly below center.
+                    textHeightBehavior: TextHeightBehavior(
+                      applyHeightToFirstAscent: isShortCharacter!,
+                      applyHeightToLastDescent: false,
+                    ),
                   ),
-                  // Required to center the individual character within the
-                  // shape. Since letters like 'm' are shorter than letters
-                  // like 'f', there's padding applied to the top of shorter
-                  // characters in order for everything to align properly.
-                  // Since we're only dealing with individual characters, we
-                  // want to disable this behavior so shorter characters don't
-                  // appear to be slightly below center.
-                  textHeightBehavior: TextHeightBehavior(
-                    applyHeightToFirstAscent: isShortCharacter!,
-                    applyHeightToLastDescent: false,
-                  ),
-                ),
-              )
-            : Icon(
-                icon,
-                size: defaultIconSize,
-                color: color,
-              ),
+                )
+                : Icon(icon, size: defaultIconSize, color: color),
       ),
     );
   }
@@ -307,8 +285,8 @@ class _FileExplorer extends StatefulWidget {
   });
 
   final ProgramExplorerController controller;
-  final Function(VMServiceObjectNode) onItemSelected;
-  final Function(VMServiceObjectNode) onItemExpanded;
+  final void Function(VMServiceObjectNode) onItemSelected;
+  final void Function(VMServiceObjectNode) onItemExpanded;
 
   @override
   State<_FileExplorer> createState() => _FileExplorerState();
@@ -317,10 +295,11 @@ class _FileExplorer extends StatefulWidget {
 class _FileExplorerState extends State<_FileExplorer> with AutoDisposeMixin {
   late final ScrollController _scrollController;
 
-  double get selectedNodeOffset => widget.controller.selectedNodeIndex.value ==
-          -1
-      ? -1
-      : widget.controller.selectedNodeIndex.value * _programExplorerRowHeight;
+  double get selectedNodeOffset =>
+      widget.controller.selectedNodeIndex.value == -1
+          ? -1
+          : widget.controller.selectedNodeIndex.value *
+              defaultTreeViewRowHeight;
 
   @override
   void initState() {
@@ -341,7 +320,6 @@ class _FileExplorerState extends State<_FileExplorer> with AutoDisposeMixin {
   @override
   Widget build(BuildContext context) {
     return TreeView<VMServiceObjectNode>(
-      itemExtent: _programExplorerRowHeight,
       dataRootsListenable: widget.controller.rootObjectNodes,
       onItemSelected: widget.onItemSelected,
       onItemExpanded: widget.onItemExpanded,
@@ -349,10 +327,9 @@ class _FileExplorerState extends State<_FileExplorer> with AutoDisposeMixin {
       includeScrollbar: true,
       dataDisplayProvider: (node, onTap) {
         return _ProgramExplorerRow(
-          controller: widget.controller,
           node: node,
           onTap: () {
-            widget.controller.selectNode(node);
+            unawaited(widget.controller.selectNode(node));
             onTap();
           },
         );
@@ -369,10 +346,12 @@ class _FileExplorerState extends State<_FileExplorer> with AutoDisposeMixin {
       _scrollController.offset + _scrollController.position.extentInside,
     );
     if (!extentVisible.contains(selectedNodeOffset)) {
-      _scrollController.animateTo(
-        selectedNodeOffset - _selectedNodeTopSpacing,
-        duration: longDuration,
-        curve: defaultCurve,
+      unawaited(
+        _scrollController.animateTo(
+          selectedNodeOffset - _selectedNodeTopSpacing,
+          duration: longDuration,
+          curve: defaultCurve,
+        ),
       );
     }
   }
@@ -386,8 +365,8 @@ class _ProgramOutlineView extends StatelessWidget {
   });
 
   final ProgramExplorerController controller;
-  final Function(VMServiceObjectNode) onItemSelected;
-  final Function(VMServiceObjectNode) onItemExpanded;
+  final void Function(VMServiceObjectNode) onItemSelected;
+  final void Function(VMServiceObjectNode) onItemExpanded;
 
   @override
   Widget build(BuildContext context) {
@@ -398,13 +377,11 @@ class _ProgramOutlineView extends StatelessWidget {
           return const CenteredCircularProgressIndicator();
         }
         return TreeView<VMServiceObjectNode>(
-          itemExtent: _programExplorerRowHeight,
           dataRootsListenable: controller.outlineNodes,
           onItemSelected: onItemSelected,
           onItemExpanded: onItemExpanded,
           dataDisplayProvider: (node, onTap) {
             return _ProgramExplorerRow(
-              controller: controller,
               node: node,
               onTap: () async {
                 await node.populateLocation();
@@ -413,9 +390,8 @@ class _ProgramOutlineView extends StatelessWidget {
               },
             );
           },
-          emptyTreeViewBuilder: () => const Center(
-            child: Text('Nothing to inspect'),
-          ),
+          emptyTreeViewBuilder:
+              () => const Center(child: Text('Nothing to inspect')),
         );
       },
     );
@@ -426,17 +402,17 @@ class _ProgramOutlineView extends StatelessWidget {
 /// filtering.
 class ProgramExplorer extends StatelessWidget {
   const ProgramExplorer({
-    Key? key,
+    super.key,
     required this.controller,
     this.title = 'File Explorer',
     this.onNodeSelected,
-    this.displayCodeNodes = false,
+    this.displayHeader = true,
   });
 
   final ProgramExplorerController controller;
   final String title;
   final void Function(VMServiceObjectNode)? onNodeSelected;
-  final bool displayCodeNodes;
+  final bool displayHeader;
 
   @override
   Widget build(BuildContext context) {
@@ -447,10 +423,14 @@ class ProgramExplorer extends StatelessWidget {
         if (!initialized) {
           body = const CenteredCircularProgressIndicator();
         } else {
-          final fileExplorerHeader = AreaPaneHeader(
-            title: Text(title),
-            needsTopBorder: false,
-          );
+          final fileExplorerHeader =
+              displayHeader
+                  ? AreaPaneHeader(
+                    title: Text(title),
+                    includeTopBorder: false,
+                    roundedTopBorder: false,
+                  )
+                  : const BlankHeader();
           final fileExplorer = _FileExplorer(
             controller: controller,
             onItemExpanded: onItemExpanded,
@@ -467,36 +447,40 @@ class ProgramExplorer extends StatelessWidget {
               // the above issues are resolved.
               //
               // See https://github.com/flutter/devtools/issues/3447.
-              return serviceManager.connectedApp!.isDartWebAppNow!
+              return serviceConnection
+                      .serviceManager
+                      .connectedApp!
+                      .isDartWebAppNow!
                   ? Column(
-                      children: [
-                        fileExplorerHeader,
-                        Expanded(child: fileExplorer),
-                      ],
-                    )
+                    children: [
+                      fileExplorerHeader,
+                      Expanded(child: fileExplorer),
+                    ],
+                  )
                   : FlexSplitColumn(
-                      totalHeight: constraints.maxHeight,
-                      initialFractions: const [0.7, 0.3],
-                      minSizes: const [0.0, 0.0],
-                      headers: <PreferredSizeWidget>[
-                        fileExplorerHeader,
-                        const AreaPaneHeader(title: Text('Outline')),
-                      ],
-                      children: [
-                        fileExplorer,
-                        _ProgramOutlineView(
-                          controller: controller,
-                          onItemExpanded: onItemExpanded,
-                          onItemSelected: onItemSelected,
-                        ),
-                      ],
-                    );
+                    totalHeight: constraints.maxHeight,
+                    initialFractions: const [0.7, 0.3],
+                    minSizes: const [0.0, 0.0],
+                    headers: <PreferredSizeWidget>[
+                      fileExplorerHeader as PreferredSizeWidget,
+                      const AreaPaneHeader(
+                        title: Text('Outline'),
+                        roundedTopBorder: false,
+                      ),
+                    ],
+                    children: [
+                      fileExplorer,
+                      _ProgramOutlineView(
+                        controller: controller,
+                        onItemExpanded: onItemExpanded,
+                        onItemSelected: onItemSelected,
+                      ),
+                    ],
+                  );
             },
           );
         }
-        return OutlineDecoration(
-          child: body,
-        );
+        return body;
       },
     );
   }

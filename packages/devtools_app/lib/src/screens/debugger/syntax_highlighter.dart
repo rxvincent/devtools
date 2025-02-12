@@ -1,27 +1,30 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:logging/logging.dart';
 
-import '../../shared/theme.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/colors.dart';
 import 'span_parser.dart';
 
-class SyntaxHighlighter {
-  SyntaxHighlighter({source}) : source = source ?? '';
+final _log = Logger('syntax_highlighter');
 
-  SyntaxHighlighter.withGrammar({
-    Grammar? grammar,
-    source,
-  }) : source = source ?? '' {
+class SyntaxHighlighter {
+  SyntaxHighlighter({String? source}) : source = source ?? '';
+
+  SyntaxHighlighter.withGrammar({Grammar? grammar, String? source})
+    : source = source ?? '' {
     _grammar = grammar;
   }
 
   final String source;
+  late String _processedSource;
 
   final _spanStack = ListQueue<ScopeSpan>();
 
@@ -39,19 +42,45 @@ class SyntaxHighlighter {
       final grammarJson = json.decode(
         await rootBundle.loadString('assets/dart_syntax.json'),
       );
-      _grammar = Grammar.fromJson(grammarJson);
+      try {
+        _grammar = Grammar.fromJson(grammarJson);
+      } catch (error) {
+        // Safari does not support negative-lookbehind regex which are currently
+        // required by the syntax highlighting. An unhandled exception here will
+        // prevent DevTools initializing, so just print the error and leave
+        // syntax highlighting disabled if this happens.
+        _log.warning(
+          'Failed to load Dart Syntax Highlighting:\n'
+          '$error',
+        );
+      }
     }
   }
 
-  TextSpan highlight(BuildContext context) {
+  /// Returns the highlighted [source] in [TextSpan] form.
+  ///
+  /// If [lineRange] is provided, only the lines between
+  /// `[lineRange.begin, lineRange.end]` will be returned.
+  TextSpan highlight(BuildContext context, {LineRange? lineRange}) {
     // Generate the styling for the various scopes based on the current theme.
     _scopeStyles = _buildSyntaxColorTable(Theme.of(context));
     _currentPosition = 0;
+    _processedSource = source;
+    if (lineRange != null) {
+      _processedSource = _processedSource
+          .split('\n')
+          .sublist(lineRange.begin - 1, lineRange.end)
+          .join('\n');
+    }
+    final grammar = _grammar;
+    if (grammar == null) {
+      return TextSpan(text: _processedSource);
+    }
     return TextSpan(
       children: _highlightLoopHelper(
         currentScope: null,
-        loopCondition: () => _currentPosition < source.length,
-        scopes: SpanParser.parse(_grammar!, source),
+        loopCondition: () => _currentPosition < _processedSource.length,
+        scopes: SpanParser.parse(grammar, _processedSource),
       ),
     );
   }
@@ -60,21 +89,21 @@ class SyntaxHighlighter {
   ///
   /// If there are multiple scopes for a span, styling for each scope is
   /// applied in the order the scopes are listed (i.e., later scope styles take
-  /// precidence).
+  /// precedence).
   TextStyle _getStyleForSpan() {
     if (_spanStack.isEmpty) {
       return const TextStyle();
     }
     final scopes = _spanStack.last.scopes;
 
-    if (scopes == null || scopes.isEmpty) {
+    if (scopes.isEmpty) {
       return const TextStyle();
     } else if (scopes.length == 1) {
-      return _scopeStyles[scopes.first!] ?? const TextStyle();
+      return _scopeStyles[scopes.first] ?? const TextStyle();
     } else {
       var style = const TextStyle();
       for (final scope in scopes) {
-        style = style.merge(_scopeStyles[scope!] ?? const TextStyle());
+        style = style.merge(_scopeStyles[scope] ?? const TextStyle());
       }
       return style;
     }
@@ -82,10 +111,7 @@ class SyntaxHighlighter {
 
   /// Enters a new scope for a span of text. Returns a [List<TextSpan>]
   /// containing the stylized text from within the scope.
-  List<TextSpan> _scope(
-    ScopeSpan currentScope,
-    List<ScopeSpan> scopes,
-  ) {
+  List<TextSpan> _scope(ScopeSpan currentScope, List<ScopeSpan> scopes) {
     return _highlightLoopHelper(
       currentScope: currentScope,
       loopCondition: () => currentScope.contains(_currentPosition),
@@ -107,49 +133,31 @@ class SyntaxHighlighter {
       if (scopes.isNotEmpty && scopes.first.contains(_currentPosition)) {
         // Encountered the next scoped span. Close the current span and enter
         // the next.
-        final text = source.substring(
+        final text = _processedSource.substring(
           currentScopeBegin!,
           _currentPosition,
         );
         if (text.isNotEmpty) {
-          sourceSpans.add(
-            TextSpan(
-              style: _getStyleForSpan(),
-              text: text,
-            ),
-          );
+          sourceSpans.add(TextSpan(style: _getStyleForSpan(), text: text));
         }
-        sourceSpans.addAll(
-          _scope(
-            scopes.removeAt(0),
-            scopes,
-          ),
-        );
+        sourceSpans.addAll(_scope(scopes.removeAt(0), scopes));
         // Reset the beginning of the current span to the first position after
         // the close of the span that was just processed.
         currentScopeBegin = _currentPosition;
       } else if (_atNewline()) {
-        currentScopeBegin = _processNewlines(
-          sourceSpans,
-          currentScopeBegin!,
-        );
+        currentScopeBegin = _processNewlines(sourceSpans, currentScopeBegin!);
       } else {
         ++_currentPosition;
       }
     }
     // Reached the end of the text covered by the current span. Close the span
     // and exit the scope.
-    final text = source.substring(
+    final text = _processedSource.substring(
       currentScopeBegin!,
       _currentPosition,
     );
     if (text.isNotEmpty) {
-      sourceSpans.add(
-        TextSpan(
-          style: _getStyleForSpan(),
-          text: text,
-        ),
-      );
+      sourceSpans.add(TextSpan(style: _getStyleForSpan(), text: text));
     }
     if (currentScope != null) {
       _spanStack.removeLast();
@@ -158,10 +166,11 @@ class SyntaxHighlighter {
   }
 
   bool _atNewline() =>
-      String.fromCharCode(source.codeUnitAt(_currentPosition)) == '\n';
+      String.fromCharCode(_processedSource.codeUnitAt(_currentPosition)) ==
+      '\n';
 
   int? _processNewlines(List<TextSpan> sourceSpans, int currentScopeBegin) {
-    final text = source.substring(
+    final text = _processedSource.substring(
       currentScopeBegin,
       _currentPosition,
     );
@@ -169,10 +178,7 @@ class SyntaxHighlighter {
       sourceSpans.add(
         TextSpan(
           style: _getStyleForSpan(),
-          text: source.substring(
-            currentScopeBegin,
-            _currentPosition,
-          ),
+          text: _processedSource.substring(currentScopeBegin, _currentPosition),
         ),
       );
     }
@@ -181,15 +187,14 @@ class SyntaxHighlighter {
     do {
       sourceSpans.add(const TextSpan(text: '\n'));
       ++_currentPosition;
-    } while ((_currentPosition < source.length) &&
-        (String.fromCharCode(source.codeUnitAt(_currentPosition)) == '\n'));
+    } while ((_currentPosition < _processedSource.length) &&
+        (String.fromCharCode(_processedSource.codeUnitAt(_currentPosition)) ==
+            '\n'));
     return _currentPosition;
   }
 
   Map<String, TextStyle> _buildSyntaxColorTable(ThemeData theme) {
-    final commentStyle = TextStyle(
-      color: theme.colorScheme.commentSyntaxColor,
-    );
+    final commentStyle = TextStyle(color: theme.colorScheme.commentSyntaxColor);
     final functionStyle = TextStyle(
       color: theme.colorScheme.functionSyntaxColor,
     );
@@ -205,9 +210,7 @@ class SyntaxHighlighter {
     final variableStyle = TextStyle(
       color: theme.colorScheme.variableSyntaxColor,
     );
-    final stringStyle = TextStyle(
-      color: theme.colorScheme.stringSyntaxColor,
-    );
+    final stringStyle = TextStyle(color: theme.colorScheme.stringSyntaxColor);
     final numericConstantStyle = TextStyle(
       color: theme.colorScheme.numericConstantSyntaxColor,
     );
@@ -235,17 +238,14 @@ class SyntaxHighlighter {
       'variable.language.dart',
     ];
 
-    const numericConstantScopes = <String>[
-      'constant.numeric.dart',
-    ];
+    const numericConstantScopes = <String>['constant.numeric.dart'];
 
-    const functionScopes = <String>[
-      'entity.name.function.dart',
-    ];
+    const functionScopes = <String>['entity.name.function.dart'];
 
     const controlFlowScopes = <String>[
       'keyword.control.catch-exception.dart',
       'keyword.control.dart',
+      'keyword.control.return.dart',
       // While 'new' is not a control flow keyword, it uses the control flow
       // color scheme so we include it here.
       'keyword.control.new.dart',
@@ -271,24 +271,22 @@ class SyntaxHighlighter {
       'variable.parameter.dart',
     ];
 
-    Map<String, TextStyle> _scopeTextStyleMapper(
+    Map<String, TextStyle> scopeTextStyleMapper(
       List<String> scopes,
       TextStyle style,
     ) {
-      return {
-        for (final scope in scopes) scope: style,
-      };
+      return {for (final scope in scopes) scope: style};
     }
 
     return <String, TextStyle>{
-      ..._scopeTextStyleMapper(modifierScopes, modifierStyle),
-      ..._scopeTextStyleMapper(commentScopes, commentStyle),
-      ..._scopeTextStyleMapper(declarationScopes, declarationStyle),
-      ..._scopeTextStyleMapper(numericConstantScopes, numericConstantStyle),
-      ..._scopeTextStyleMapper(functionScopes, functionStyle),
-      ..._scopeTextStyleMapper(controlFlowScopes, controlFlowStyle),
-      ..._scopeTextStyleMapper(stringScopes, stringStyle),
-      ..._scopeTextStyleMapper(variableScopes, variableStyle),
+      ...scopeTextStyleMapper(modifierScopes, modifierStyle),
+      ...scopeTextStyleMapper(commentScopes, commentStyle),
+      ...scopeTextStyleMapper(declarationScopes, declarationStyle),
+      ...scopeTextStyleMapper(numericConstantScopes, numericConstantStyle),
+      ...scopeTextStyleMapper(functionScopes, functionStyle),
+      ...scopeTextStyleMapper(controlFlowScopes, controlFlowStyle),
+      ...scopeTextStyleMapper(stringScopes, stringStyle),
+      ...scopeTextStyleMapper(variableScopes, variableStyle),
     };
   }
 }

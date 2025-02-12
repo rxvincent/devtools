@@ -1,15 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
-
-import 'dart:typed_data';
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'package:vm_service/vm_service.dart';
 
-import '../../primitives/trees.dart';
-import '../../ui/search.dart';
-import '../inspector/diagnostics_node.dart';
-import '../inspector/inspector_service.dart';
+import '../../shared/diagnostics/primitives/source_location.dart';
+import '../../shared/primitives/simple_items.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/search.dart';
 
 /// Whether to include properties surfaced through Diagnosticable objects as
 /// part of the generic Debugger view of an object.
@@ -25,60 +23,16 @@ bool includeDiagnosticPropertiesInDebugger = true;
 /// summary tree case which has a filtered view of children.
 bool includeDiagnosticChildren = false;
 
-/// A generic [InstanceRef] using either format used by the [InspectorService]
-/// or Dart VM.
-///
-/// Either one or both of [value] and [diagnostic] may be provided. The
-/// `valueRef` getter on the [diagnostic] should refer to the same object as
-/// [instanceRef] although using the [InspectorInstanceRef] scheme.
-/// A [RemoteDiagnosticsNode] is used rather than an [InspectorInstanceRef] as
-/// the additional data provided by [RemoteDiagnosticsNode] is helpful to
-/// correctly display the object and [RemoteDiagnosticsNode] includes a
-/// reference to an [InspectorInstanceRef]. [value] must be an ObjectRef,
-/// Sentinel, or primitive type.
-class GenericInstanceRef {
-  GenericInstanceRef({
-    required this.isolateRef,
-    this.value,
-    this.diagnostic,
-  }) : assert(
-          value == null ||
-              value is ObjRef ||
-              value is Sentinel ||
-              value is num ||
-              value is String ||
-              value is bool ||
-              value is Int32x4 ||
-              value is Float32x4 ||
-              value is Float64x2,
-        );
-
-  final Object? value;
-
-  InstanceRef? get instanceRef =>
-      value is InstanceRef ? value as InstanceRef? : null;
-
-  /// If both [diagnostic] and [instanceRef] are provided, [diagnostic.valueRef]
-  /// must reference the same underlying object just using the
-  /// [InspectorInstanceRef] scheme.
-  final RemoteDiagnosticsNode? diagnostic;
-
-  final IsolateRef? isolateRef;
-}
-
 /// A tuple of a script and an optional location.
 class ScriptLocation {
-  ScriptLocation(
-    this.scriptRef, {
-    this.location,
-  });
+  ScriptLocation(this.scriptRef, {this.location});
 
   final ScriptRef scriptRef;
 
   final SourcePosition? location;
 
   @override
-  bool operator ==(other) {
+  bool operator ==(Object other) {
     return other is ScriptLocation &&
         other.scriptRef == scriptRef &&
         other.location == location;
@@ -91,44 +45,7 @@ class ScriptLocation {
   String toString() => '${scriptRef.uri} $location';
 }
 
-class SourcePosition {
-  const SourcePosition({
-    required this.line,
-    required this.column,
-    this.file,
-    this.tokenPos,
-  });
-
-  factory SourcePosition.calculatePosition(Script script, int tokenPos) {
-    return SourcePosition(
-      line: script.getLineNumberFromTokenPos(tokenPos),
-      column: script.getColumnNumberFromTokenPos(tokenPos),
-      tokenPos: tokenPos,
-    );
-  }
-
-  final String? file;
-  final int? line;
-  final int? column;
-  final int? tokenPos;
-
-  @override
-  bool operator ==(other) {
-    return other is SourcePosition &&
-        other.line == line &&
-        other.column == column &&
-        other.tokenPos == tokenPos;
-  }
-
-  @override
-  int get hashCode =>
-      line != null && column != null ? (line! << 7) ^ column! : super.hashCode;
-
-  @override
-  String toString() => '$line:$column';
-}
-
-class SourceToken with DataSearchStateMixin {
+class SourceToken with SearchableDataMixin {
   SourceToken({required this.position, required this.length});
 
   final SourcePosition position;
@@ -187,7 +104,7 @@ abstract class BreakpointAndSourcePosition
   @override
   int get hashCode => breakpoint.hashCode;
   @override
-  bool operator ==(other) {
+  bool operator ==(Object other) {
     return other is BreakpointAndSourcePosition &&
         other.breakpoint == breakpoint;
   }
@@ -216,10 +133,10 @@ abstract class BreakpointAndSourcePosition
 
 class _BreakpointAndSourcePositionResolved extends BreakpointAndSourcePosition {
   _BreakpointAndSourcePositionResolved(
-    Breakpoint breakpoint,
-    SourcePosition? sourcePosition,
+    super.breakpoint,
+    super.sourcePosition,
     this.location,
-  ) : super._(breakpoint, sourcePosition);
+  ) : super._();
 
   final SourceLocation location;
 
@@ -242,10 +159,10 @@ class _BreakpointAndSourcePositionResolved extends BreakpointAndSourcePosition {
 class _BreakpointAndSourcePositionUnresolved
     extends BreakpointAndSourcePosition {
   _BreakpointAndSourcePositionUnresolved(
-    Breakpoint breakpoint,
-    SourcePosition? sourcePosition,
+    super.breakpoint,
+    super.sourcePosition,
     this.location,
-  ) : super._(breakpoint, sourcePosition);
+  ) : super._();
 
   final UnresolvedSourceLocation location;
 
@@ -267,10 +184,7 @@ class _BreakpointAndSourcePositionUnresolved
 
 /// A tuple of a stack frame and a source position.
 class StackFrameAndSourcePosition {
-  StackFrameAndSourcePosition(
-    this.frame, {
-    this.position,
-  });
+  StackFrameAndSourcePosition(this.frame, {this.position});
 
   final Frame frame;
 
@@ -293,8 +207,6 @@ class StackFrameAndSourcePosition {
   String get description {
     const unoptimized = '[Unoptimized] ';
     const none = '<none>';
-    const anonymousClosure = '<anonymous closure>';
-    const closure = '<closure>';
     const asyncBreak = '<async break>';
 
     if (frame.kind == FrameKind.kAsyncSuspensionMarker) {
@@ -305,8 +217,12 @@ class StackFrameAndSourcePosition {
     if (name.startsWith(unoptimized)) {
       name = name.substring(unoptimized.length);
     }
-    name = name.replaceAll(anonymousClosure, closure);
-    name = name == none ? name : '$name';
+    name = name.replaceAll(anonymousClosureName, closureName);
+
+    if (frame.code?.kind == CodeKind.kNative) {
+      return '<native code: $name>';
+    }
+
     return name;
   }
 
@@ -315,147 +231,13 @@ class StackFrameAndSourcePosition {
     if (uri == null) {
       return uri;
     }
-    final file = uri.split('/').last;
+    final file = fileNameFromUri(uri);
     return line == null ? file : '$file:$line';
   }
 }
 
-/// A node in a tree of scripts.
-///
-/// A node can either be a directory (a name with potentially some child nodes),
-/// a script reference (where [scriptRef] is non-null), or a combination of both
-/// (where the node has a non-null [scriptRef] but also contains child nodes).
-class FileNode extends TreeNode<FileNode> {
-  FileNode(this.name);
-
-  final String name;
-
-  ScriptRef? scriptRef;
-
-  /// This exists to allow for O(1) lookup of children when building the tree.
-  final Map<String, FileNode> _childrenAsMap = {};
-
-  bool get hasScript => scriptRef != null;
-
-  String _fileName = '';
-
-  /// Returns the name of the file.
-  ///
-  /// May be empty.
-  String get fileName => _fileName;
-
-  /// Given a flat list of service protocol scripts, return a tree of scripts
-  /// representing the best hierarchical grouping.
-  static List<FileNode> createRootsFrom(List<ScriptRef> scripts) {
-    // The name of this node is not exposed to users.
-    final root = FileNode('<root>');
-
-    for (var script in scripts) {
-      final directoryParts = ScriptRefUtils.splitDirectoryParts(script);
-
-      FileNode node = root;
-
-      for (var name in directoryParts) {
-        node = node._getCreateChild(name);
-      }
-
-      node.scriptRef = script;
-      node._fileName = ScriptRefUtils.fileName(script);
-    }
-
-    // Clear out the _childrenAsMap map.
-    root._trimChildrenAsMapEntries();
-
-    return root.children;
-  }
-
-  FileNode _getCreateChild(String name) {
-    return _childrenAsMap.putIfAbsent(name, () {
-      final child = FileNode(name);
-      child.parent = this;
-      children.add(child);
-      return child;
-    });
-  }
-
-  /// Clear the _childrenAsMap map recursively to save memory.
-  void _trimChildrenAsMapEntries() {
-    _childrenAsMap.clear();
-
-    for (var child in children) {
-      child._trimChildrenAsMapEntries();
-    }
-  }
-
-  @override
-  FileNode shallowCopy() {
-    throw UnimplementedError(
-      'This method is not implemented. Implement if you '
-      'need to call `shallowCopy` on an instance of this class.',
-    );
-  }
-
-  @override
-  int get hashCode => scriptRef?.hashCode ?? name.hashCode;
-
-  @override
-  bool operator ==(Object other) {
-    if (other is! FileNode) return false;
-    final FileNode node = other;
-
-    if (scriptRef == null) {
-      return node.scriptRef != null ? false : name == node.name;
-    } else {
-      return node.scriptRef == null ? false : scriptRef == node.scriptRef;
-    }
-  }
-}
-
-// ignore: avoid_classes_with_only_static_members
-class ScriptRefUtils {
+// ignore: avoid_classes_with_only_static_members, fine for utility method.
+abstract class ScriptRefUtils {
   static String fileName(ScriptRef scriptRef) =>
-      Uri.parse(scriptRef.uri!).path.split('/').last;
-
-  /// Return the Uri for the given ScriptRef split into path segments.
-  ///
-  /// This is useful for converting a flat list of scripts into a directory tree
-  /// structure.
-  static List<String> splitDirectoryParts(ScriptRef scriptRef) {
-    final uri = Uri.parse(scriptRef.uri!);
-    final scheme = uri.scheme;
-    var parts = uri.path.split('/');
-
-    // handle google3:///foo/bar
-    if (parts.first.isEmpty) {
-      parts = parts.where((part) => part.isNotEmpty).toList();
-      // Combine the first non-empty path segment with the scheme:
-      // 'google3:foo'.
-      parts = [
-        '$scheme:${parts.first}',
-        ...parts.sublist(1),
-      ];
-    } else if (parts.first.contains('.')) {
-      // Look for and handle dotted package names (package:foo.bar).
-      final dottedParts = parts.first.split('.');
-      parts = [
-        '$scheme:${dottedParts.first}',
-        ...dottedParts.sublist(1),
-        ...parts.sublist(1),
-      ];
-    } else {
-      parts = [
-        '$scheme:${parts.first}',
-        ...parts.sublist(1),
-      ];
-    }
-
-    if (parts.length > 1) {
-      return [
-        parts.first,
-        parts.sublist(1).join('/'),
-      ];
-    } else {
-      return parts;
-    }
-  }
+      fileNameFromUri(Uri.parse(scriptRef.uri!).path)!;
 }

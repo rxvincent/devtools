@@ -1,16 +1,29 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'dart:async';
+
+import 'package:devtools_app_shared/ui.dart';
+import 'package:devtools_app_shared/utils.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:stack_trace/stack_trace.dart' as stack_trace;
 import 'package:vm_service/vm_service.dart';
 
-import '../../primitives/utils.dart';
-import '../../shared/common_widgets.dart';
-import '../../shared/table.dart';
-import '../../shared/theme.dart';
-import 'vm_object_model.dart';
+import '../../shared/analytics/constants.dart' as gac;
+import '../../shared/globals.dart';
+import '../../shared/primitives/byte_utils.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/common_widgets.dart';
+import '../../shared/ui/tree_view.dart';
+import '../debugger/codeview.dart';
+import '../debugger/codeview_controller.dart';
+import '../debugger/debugger_model.dart';
+import 'object_inspector/inbound_references_tree.dart';
+import 'object_inspector/object_inspector_view_controller.dart';
+import 'object_inspector/vm_object_model.dart';
 import 'vm_service_private_extensions.dart';
 
 /// A convenience widget used to create non-scrollable information cards.
@@ -24,12 +37,15 @@ import 'vm_service_private_extensions.dart';
 /// rows specified for `rowKeyValues`.
 class VMInfoCard extends StatelessWidget implements PreferredSizeWidget {
   const VMInfoCard({
+    super.key,
     required this.title,
+    this.roundedTopBorder = true,
     this.rowKeyValues,
     this.table,
   });
 
   final String title;
+  final bool roundedTopBorder;
   final List<MapEntry<String, WidgetBuilder>>? rowKeyValues;
   final Widget? table;
 
@@ -37,12 +53,11 @@ class VMInfoCard extends StatelessWidget implements PreferredSizeWidget {
   Widget build(BuildContext context) {
     return SizedBox.fromSize(
       size: preferredSize,
-      child: Card(
-        child: VMInfoList(
-          title: title,
-          rowKeyValues: rowKeyValues,
-          table: table,
-        ),
+      child: VMInfoList(
+        title: title,
+        roundedTopBorder: roundedTopBorder,
+        rowKeyValues: rowKeyValues,
+        table: table,
       ),
     );
   }
@@ -53,7 +68,7 @@ class VMInfoCard extends StatelessWidget implements PreferredSizeWidget {
       return Size.infinite;
     }
     return Size.fromHeight(
-      areaPaneHeaderHeight +
+      defaultHeaderHeight +
           (rowKeyValues?.length ?? 0) * defaultRowHeight +
           defaultSpacing,
     );
@@ -66,21 +81,39 @@ MapEntry<String, WidgetBuilder> selectableTextBuilderMapEntry(
 ) {
   return MapEntry(
     key,
-    (context) => SelectableText(
-      value ?? '--',
-      style: Theme.of(context).fixedFontStyle,
+    (context) => Text(value ?? '--', style: Theme.of(context).fixedFontStyle),
+  );
+}
+
+MapEntry<String, WidgetBuilder> serviceObjectLinkBuilderMapEntry({
+  required ObjectInspectorViewController controller,
+  required String key,
+  required Response? object,
+  bool preferUri = false,
+  String Function(Response?)? textBuilder,
+}) {
+  return MapEntry(
+    key,
+    (context) => VmServiceObjectLink(
+      object: object,
+      textBuilder: textBuilder,
+      preferUri: preferUri,
+      onTap: controller.findAndSelectNodeForObject,
     ),
   );
 }
 
 class VMInfoList extends StatelessWidget {
   const VMInfoList({
+    super.key,
     required this.title,
+    this.roundedTopBorder = true,
     this.rowKeyValues,
     this.table,
   });
 
   final String title;
+  final bool roundedTopBorder;
   final List<MapEntry<String, WidgetBuilder>>? rowKeyValues;
   final Widget? table;
 
@@ -95,7 +128,8 @@ class VMInfoList extends StatelessWidget {
       children: [
         AreaPaneHeader(
           title: Text(title),
-          needsTopBorder: false,
+          includeTopBorder: false,
+          roundedTopBorder: roundedTopBorder,
         ),
         if (rowKeyValues != null)
           Expanded(
@@ -104,25 +138,20 @@ class VMInfoList extends StatelessWidget {
               controller: listScrollController,
               child: ListView(
                 controller: listScrollController,
-                children: prettyRows(
-                  context,
-                  [
-                    for (final row in rowKeyValues)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          SelectableText(
-                            '${row.key.toString()}:',
-                            style: theme.fixedFontStyle,
-                          ),
-                          const SizedBox(width: denseSpacing),
-                          Flexible(
-                            child: Builder(builder: row.value),
-                          ),
-                        ],
-                      )
-                  ],
-                ),
+                children: prettyRows(context, [
+                  for (final row in rowKeyValues)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${row.key.toString()}:',
+                          style: theme.fixedFontStyle,
+                        ),
+                        const SizedBox(width: denseSpacing),
+                        Flexible(child: Builder(builder: row.value)),
+                      ],
+                    ),
+                ]),
               ),
             ),
           ),
@@ -143,21 +172,9 @@ Widget _buildAlternatingRow(BuildContext context, int index, Widget row) {
   return Container(
     color: alternatingColorForIndex(index, Theme.of(context).colorScheme),
     height: defaultRowHeight,
-    padding: const EdgeInsets.symmetric(
-      horizontal: defaultSpacing,
-    ),
+    padding: const EdgeInsets.symmetric(horizontal: defaultSpacing),
     child: row,
   );
-}
-
-/// An IconLabelButton with label 'Request' and a 'call made' icon.
-class RequestDataButton extends IconLabelButton {
-  const RequestDataButton({
-    required super.onPressed,
-    super.icon = Icons.call_made,
-    super.label = 'Request',
-    super.outlined = false,
-  });
 }
 
 /// Displays a RequestDataButton if the data provided by [sizeProvider] is null,
@@ -168,6 +185,7 @@ class RequestDataButton extends IconLabelButton {
 /// a CircularProgressIndicator will be displayed.
 class RequestableSizeWidget extends StatelessWidget {
   const RequestableSizeWidget({
+    super.key,
     required this.fetching,
     required this.sizeProvider,
     required this.requestFunction,
@@ -193,81 +211,33 @@ class RequestableSizeWidget extends StatelessWidget {
         } else {
           final size = sizeProvider();
           return size == null
-              ? RequestDataButton(onPressed: requestFunction)
+              ? GaDevToolsButton(
+                icon: Icons.call_made,
+                label: 'Request',
+                outlined: false,
+                gaScreen: gac.vmTools,
+                gaSelection: gac.requestSize,
+                onPressed: requestFunction,
+              )
               : Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    SelectableText(
-                      size.valueAsString == null
-                          ? '--'
-                          : prettyPrintBytes(
-                              int.parse(size.valueAsString!),
-                              includeUnit: true,
-                              kbFractionDigits: 1,
-                              maxBytes: 512,
-                            )!,
-                    ),
-                    ToolbarRefresh(onPressed: requestFunction),
-                  ],
-                );
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    size.valueAsString == null
+                        ? '--'
+                        : prettyPrintBytes(
+                          int.parse(size.valueAsString!),
+                          includeUnit: true,
+                          maxBytes: 512,
+                        )!,
+                  ),
+                  ToolbarRefresh(onPressed: requestFunction),
+                ],
+              );
         }
       },
     );
   }
-}
-
-/// Wrapper to get the name of an ObjRef depending on its type.
-String? _objectName(ObjRef? objectRef) {
-  if (objectRef == null) {
-    return null;
-  }
-
-  String? objectRefName;
-
-  if (objectRef is ClassRef || objectRef is FuncRef || objectRef is FieldRef) {
-    objectRefName = (objectRef as dynamic).name;
-  } else if (objectRef is LibraryRef) {
-    objectRefName =
-        (objectRef.name?.isEmpty ?? false) ? objectRef.uri : objectRef.name;
-  } else if (objectRef is ScriptRef) {
-    objectRefName = fileNameFromUri(objectRef.uri);
-  } else if (objectRef is InstanceRef) {
-    objectRefName = objectRef.name ??
-        'Instance of ${objectRef.classRef?.name ?? '<Class>'}';
-  } else {
-    objectRefName = objectRef.vmType ?? objectRef.type;
-
-    if (objectRefName.startsWith('@')) {
-      objectRefName = objectRefName.substring(1, objectRefName.length);
-    }
-  }
-
-  return objectRefName;
-}
-
-/// Returns the owner name of a Field or Func object, if [object] is a
-/// FuncObject, it returns the complete (qualified) name of the owner.
-String? _ownerName(VmObject object) {
-  assert(object is FieldObject || object is FuncObject);
-  final owner = (object as dynamic).obj.owner as ObjRef?;
-
-  if (owner == null) {
-    return object.script?.uri;
-  }
-
-  if (object is FieldObject) {
-    if (owner is ClassRef || owner is LibraryRef) {
-      return _objectName(owner);
-    }
-  } else if (object is FuncObject) {
-    if (owner is LibraryRef) {
-      return _objectName(owner);
-    } else {
-      return qualifiedName(owner);
-    }
-  }
-
-  throw Exception('Unexpected owner type: ${owner.type}');
 }
 
 /// Returns the name of a function, qualified with the name of
@@ -285,33 +255,19 @@ String? qualifiedName(ObjRef? ref) {
   if (ref is ClassRef) {
     return '${ref.name}';
   } else if (ref is FuncRef) {
-    if (ref.owner is! LibraryRef) {
-      return '${qualifiedName(ref.owner)}.${ref.name}';
-    } else {
-      return '${ref.name}';
-    }
+    return ref.owner is! LibraryRef
+        ? '${qualifiedName(ref.owner)}.${ref.name}'
+        : '${ref.name}';
   }
 
   throw Exception('Unexpected owner type: ${ref.type}');
-}
-
-// Returns a description of the object containing its name and owner.
-String? _objectDescription(ObjRef? object) {
-  if (object == null) {
-    return null;
-  } else if (object is FieldRef) {
-    return '${object.declaredType?.name ?? 'Field'} ${object.name} of ${_objectName(object.owner) ?? '<Owner>'}';
-  } else if (object is FuncRef) {
-    return '${qualifiedName(object) ?? '<Function Name>'}';
-  } else {
-    return '${_objectName(object)}';
-  }
 }
 
 /// An ExpansionTile with an AreaPaneHeader as header and custom style
 /// for the VM tools tab.
 class VmExpansionTile extends StatelessWidget {
   const VmExpansionTile({
+    super.key,
     required this.title,
     required this.children,
     this.onExpanded,
@@ -323,21 +279,23 @@ class VmExpansionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final titleRow = AreaPaneHeader(
-      title: Text(title),
-      needsTopBorder: false,
-    );
+    final theme = Theme.of(context);
     return Card(
       child: ListTileTheme(
         data: ListTileTheme.of(context).copyWith(dense: true),
-        child: ExpansionTile(
-          title: titleRow,
-          onExpansionChanged: onExpanded,
-          tilePadding: const EdgeInsets.only(
-            left: densePadding,
-            right: defaultSpacing,
+        child: Theme(
+          // Prevents divider lines appearing at the top and bottom of the
+          // expanded ExpansionTile.
+          data: theme.copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            title: DefaultTextStyle(
+              style: theme.textTheme.titleMedium!,
+              child: Text(title),
+            ),
+            onExpansionChanged: onExpanded,
+            tilePadding: const EdgeInsets.symmetric(horizontal: defaultSpacing),
+            children: children,
           ),
-          children: children,
         ),
       ),
     );
@@ -345,6 +303,8 @@ class VmExpansionTile extends StatelessWidget {
 }
 
 class SizedCircularProgressIndicator extends StatelessWidget {
+  const SizedCircularProgressIndicator({super.key});
+
   @override
   Widget build(BuildContext context) {
     return SizedBox.fromSize(
@@ -356,13 +316,50 @@ class SizedCircularProgressIndicator extends StatelessWidget {
   }
 }
 
+class ExpansionTileInstanceList extends StatelessWidget {
+  const ExpansionTileInstanceList({
+    super.key,
+    required this.controller,
+    required this.title,
+    required this.elements,
+  });
+
+  final ObjectInspectorViewController controller;
+  final String title;
+  final List<Response?> elements;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final children = <Row>[
+      for (int i = 0; i < elements.length; ++i)
+        Row(
+          children: [
+            Text('[$i]: ', style: theme.subtleFixedFontStyle),
+            VmServiceObjectLink(
+              object: elements[i],
+              onTap: controller.findAndSelectNodeForObject,
+            ),
+          ],
+        ),
+    ];
+    return VmExpansionTile(
+      title: '$title (${elements.length})',
+      children: prettyRows(context, children),
+    );
+  }
+}
+
 /// An expandable list to display the retaining objects for a given RetainingPath.
 class RetainingPathWidget extends StatelessWidget {
   const RetainingPathWidget({
+    super.key,
+    required this.controller,
     required this.retainingPath,
     this.onExpanded,
   });
 
+  final ObjectInspectorViewController controller;
   final ValueListenable<RetainingPath?> retainingPath;
   final void Function(bool)? onExpanded;
 
@@ -371,24 +368,22 @@ class RetainingPathWidget extends StatelessWidget {
     return ValueListenableBuilder<RetainingPath?>(
       valueListenable: retainingPath,
       builder: (context, retainingPath, _) {
-        final retainingObjects = retainingPath == null
-            ? const <Widget>[]
-            : _retainingPathList(
-                context,
-                retainingPath,
-              );
+        final retainingObjects =
+            retainingPath == null
+                ? const <Widget>[]
+                : _retainingPathList(context, retainingPath);
         return VmExpansionTile(
           title: 'Retaining Path',
           onExpanded: onExpanded,
           children: [
             retainingPath == null
-                ? SizedCircularProgressIndicator()
+                ? const SizedCircularProgressIndicator()
                 : SizedBox.fromSize(
-                    size: Size.fromHeight(
-                      retainingObjects.length * defaultRowHeight + densePadding,
-                    ),
-                    child: Column(children: retainingObjects),
+                  size: Size.fromHeight(
+                    retainingObjects.length * defaultRowHeight + densePadding,
                   ),
+                  child: Column(children: retainingObjects),
+                ),
           ],
         );
       },
@@ -401,198 +396,333 @@ class RetainingPathWidget extends StatelessWidget {
     BuildContext context,
     RetainingPath retainingPath,
   ) {
-    final emptyList = SelectableText(
-      'No retaining objects',
-      style: Theme.of(context).fixedFontStyle,
-    );
+    Future<void> onTap(ObjRef? obj) async {
+      if (obj == null) return;
+      await controller.findAndSelectNodeForObject(obj);
+    }
+
+    final theme = Theme.of(context);
+    final emptyList = Text('No retaining objects', style: theme.fixedFontStyle);
     if (retainingPath.elements == null) return [emptyList];
 
-    final firstRetainingObject = retainingPath.elements!.isNotEmpty
-        ? SelectableText(
-            _objectName(retainingPath.elements!.first.value) ??
-                '<RetainingObject>',
-            style: Theme.of(context).fixedFontStyle,
-          )
-        : emptyList;
+    final firstRetainingObject =
+        retainingPath.elements!.isNotEmpty
+            ? VmServiceObjectLink(
+              object: retainingPath.elements!.first.value,
+              onTap: onTap,
+            )
+            : emptyList;
 
     final retainingObjects = [
-      Row(
-        children: [
-          firstRetainingObject,
-        ],
-      ),
+      Row(children: [firstRetainingObject]),
       if (retainingPath.elements!.length > 1)
-        for (RetainingObject object in retainingPath.elements!.sublist(1))
+        for (final object in retainingPath.elements!.sublist(1))
           Row(
             children: [
               Flexible(
-                child: SelectableText(
-                  _retainingObjectDescription(object),
-                  style: Theme.of(context).fixedFontStyle,
+                child: DefaultTextStyle(
+                  style: theme.fixedFontStyle,
+                  child: _RetainingObjectDescription(
+                    object: object,
+                    onTap: onTap,
+                  ),
                 ),
               ),
             ],
           ),
       Row(
         children: [
-          SelectableText(
-            'Retained by a GC root of type ${retainingPath.gcRootType ?? '<unknown>'}',
-            style: Theme.of(context).fixedFontStyle,
+          Text(
+            'Retained by a GC root of type: ${retainingPath.gcRootType ?? '<unknown>'}',
+            style: theme.fixedFontStyle,
           ),
         ],
-      )
+      ),
     ];
 
     return prettyRows(context, retainingObjects);
   }
+}
 
-  /// Describes the given RetainingObject [object] and its parentListIndex,
-  /// parentMapKey, and parentField where applicable.
-  String _retainingObjectDescription(RetainingObject object) {
+class _RetainingObjectDescription extends StatelessWidget {
+  const _RetainingObjectDescription({
+    required this.object,
+    required this.onTap,
+  });
+
+  final RetainingObject object;
+  final void Function(ObjRef? obj) onTap;
+
+  @override
+  Widget build(BuildContext context) {
     final parentListIndex = object.parentListIndex;
     if (parentListIndex != null) {
-      return 'Retained by ${_parentListElementDescription(
-        parentListIndex,
-        object.value,
-      )}';
+      return RichText(
+        text: TextSpan(
+          children: [
+            TextSpan(text: 'Retained by element [$parentListIndex] of '),
+            VmServiceObjectLink(
+              object: object.value,
+              onTap: onTap,
+            ).buildTextSpan(context),
+          ],
+        ),
+      );
     }
 
     if (object.parentMapKey != null) {
-      final ref = object.value;
-      final parentMapKey = _objectName(object.parentMapKey);
-
-      final parentMapName = _instanceClassName(ref) ?? '<parentMapName>';
-
-      return 'Retained by element at [$parentMapKey] of $parentMapName';
+      return RichText(
+        text: TextSpan(
+          children: [
+            const TextSpan(text: 'Retained by element at ['),
+            VmServiceObjectLink(
+              object: object.parentMapKey,
+              onTap: onTap,
+            ).buildTextSpan(context),
+            const TextSpan(text: '] of '),
+            VmServiceObjectLink(
+              object: object.value,
+              onTap: onTap,
+            ).buildTextSpan(context),
+          ],
+        ),
+      );
     }
 
-    final description = StringBuffer('Retained by ');
+    final entries = <TextSpan>[const TextSpan(text: 'Retained by ')];
 
-    if (object.parentField != null) {
-      description.write('${object.parentField} of ');
+    if (object.parentField is int) {
+      assert((object.value as InstanceRef).kind == InstanceKind.kRecord);
+      entries.add(TextSpan(text: '\$${object.parentField} of '));
+    } else if (object.parentField != null) {
+      entries.add(TextSpan(text: '${object.parentField} of '));
     }
 
-    description.write(
-      _objectDescription(object.value) ?? '<object>',
-    );
-
-    return description.toString();
+    if (object.value is FieldRef) {
+      final field = object.value as FieldRef;
+      entries.addAll([
+        VmServiceObjectLink(
+          object: field.declaredType,
+          onTap: onTap,
+        ).buildTextSpan(context),
+        const TextSpan(text: ' '),
+        VmServiceObjectLink(object: field, onTap: onTap).buildTextSpan(context),
+        const TextSpan(text: ' of '),
+        VmServiceObjectLink(
+          object: field.owner,
+          onTap: onTap,
+        ).buildTextSpan(context),
+      ]);
+    } else if (object.value is FuncRef) {
+      final func = object.value as FuncRef;
+      entries.add(
+        VmServiceObjectLink(object: func, onTap: onTap).buildTextSpan(context),
+      );
+    } else {
+      entries.add(
+        VmServiceObjectLink(
+          object: object.value,
+          onTap: onTap,
+        ).buildTextSpan(context),
+      );
+    }
+    return RichText(text: TextSpan(children: entries));
   }
 }
 
-String? _instanceClassName(ObjRef? object) {
-  if (object == null) {
-    return null;
-  }
-
-  return object is InstanceRef ? object.classRef?.name : _objectName(object);
-}
-
-String _parentListElementDescription(int listIndex, ObjRef? obj) {
-  final parentListName = _instanceClassName(obj) ?? '<parentListName>';
-  return 'element [$listIndex] of $parentListName';
-}
-
-/// An expandable list to display the inbound references for a given
-/// instance of InboundReferences.
-class InboundReferencesWidget extends StatelessWidget {
-  const InboundReferencesWidget({
-    required this.inboundReferences,
+class InboundReferencesTree extends StatelessWidget {
+  const InboundReferencesTree({
+    super.key,
+    required this.controller,
+    required this.object,
     this.onExpanded,
   });
 
-  final ValueListenable<InboundReferences?> inboundReferences;
+  final ObjectInspectorViewController controller;
+  final VmObject object;
   final void Function(bool)? onExpanded;
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<InboundReferences?>(
-      valueListenable: inboundReferences,
-      builder: (context, inboundReferences, _) {
-        final references = inboundReferences == null
-            ? const <Widget>[]
-            : _inboundReferencesList(context, inboundReferences);
-
-        return VmExpansionTile(
-          title: 'Inbound References',
-          onExpanded: onExpanded,
-          children: [
-            inboundReferences == null
-                ? SizedCircularProgressIndicator()
-                : SizedBox.fromSize(
-                    size: Size.fromHeight(
-                      references.length * defaultRowHeight + densePadding,
+    final theme = Theme.of(context);
+    return VmExpansionTile(
+      title: 'Inbound References',
+      onExpanded: onExpanded,
+      children: [
+        const Divider(height: 1),
+        Container(
+          color: theme.expansionTileTheme.backgroundColor,
+          child: ValueListenableBuilder(
+            valueListenable: object.inboundReferencesTree,
+            builder: (context, references, _) {
+              return TreeView<InboundReferencesTreeNode>(
+                dataRootsListenable: object.inboundReferencesTree,
+                dataDisplayProvider:
+                    (node, _) => InboundReferenceWidget(
+                      controller: controller,
+                      node: node,
                     ),
-                    child: Column(children: references),
-                  ),
-          ],
-        );
-      },
-    );
-  }
-
-  /// Returns a list of Widgets that will be the rows in the VmExpansionTile
-  /// for InboundReferencesWidget.
-  List<Widget> _inboundReferencesList(
-    BuildContext context,
-    InboundReferences inboundRefs,
-  ) {
-    int index = 0;
-
-    final references = <Row>[];
-
-    for (final inboundRef in inboundRefs.references!) {
-      final int? parentWordOffset = inboundRefs.parentWordOffset(index);
-
-      references.add(
-        Row(
-          children: [
-            Flexible(
-              child: SelectableText(
-                _inboundRefDescription(inboundRef, parentWordOffset),
-                style: Theme.of(context).fixedFontStyle,
-              ),
-            ),
-          ],
+                emptyTreeViewBuilder: () {
+                  return Padding(
+                    padding: EdgeInsets.all(defaultRowHeight / 2),
+                    child: const Text(
+                      'There are no inbound references for this object',
+                    ),
+                  );
+                },
+                onItemExpanded: object.expandInboundRef,
+                onItemSelected: (_) => null,
+              );
+            },
+          ),
         ),
-      );
+      ],
+    );
+  }
+}
 
-      index++;
+/// An entry in a [InboundReferencesTree].
+class InboundReferenceWidget extends StatelessWidget {
+  const InboundReferenceWidget({
+    super.key,
+    required this.controller,
+    required this.node,
+  });
+
+  final ObjectInspectorViewController controller;
+  final InboundReferencesTreeNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final rowContent = <Widget>[const Text('Referenced by ')];
+
+    final parentField = node.ref.parentField;
+    if (parentField != null) {
+      if (parentField is int) {
+        // The parent field is an entry in a list
+        rowContent.add(Text('element $parentField of '));
+      } else if (parentField is String) {
+        rowContent.add(Text('$parentField in '));
+      }
     }
 
-    return prettyRows(context, references);
+    rowContent.add(
+      VmServiceObjectLink(
+        object: node.ref.source,
+        onTap: controller.findAndSelectNodeForObject,
+      ),
+    );
+    return DefaultTextStyle(
+      style: theme.regularTextStyle,
+      child: Row(children: rowContent),
+    );
+  }
+}
+
+class VmServiceObjectLink extends StatelessWidget {
+  const VmServiceObjectLink({
+    super.key,
+    required this.object,
+    required this.onTap,
+    this.preferUri = false,
+    this.textBuilder,
+  });
+
+  final Response? object;
+  final bool preferUri;
+  final String? Function(Response?)? textBuilder;
+  final FutureOr<void> Function(ObjRef) onTap;
+
+  @visibleForTesting
+  static String? defaultTextBuilder(Object? object, {bool preferUri = false}) {
+    if (object == null) return null;
+    return switch (object) {
+      FieldRef(:final name) ||
+      FuncRef(:final name) ||
+      CodeRef(:final name) ||
+      TypeArgumentsRef(:final name) => name,
+      // If a class has an empty name, it's a special "top level" class.
+      ClassRef(:final name) => name!.isEmpty ? 'top-level-class' : name,
+      LibraryRef(:final uri, :final name) =>
+        uri!.startsWith('dart') || preferUri
+            ? uri
+            : (name!.isEmpty ? uri : name),
+      ScriptRef(:final uri) => uri,
+      ContextRef(:final length) => 'Context(length: $length)',
+      Sentinel(:final valueAsString) => 'Sentinel $valueAsString',
+      InstanceRef() => _textForInstanceRef(object),
+      ObjRef(:final isICData) when isICData =>
+        'ICData(${object.asICData.selector})',
+      ObjRef(:final isObjectPool) when isObjectPool =>
+        'Object Pool(length: ${object.asObjectPool.length})',
+      ObjRef(:final isWeakArray) when isWeakArray =>
+        'WeakArray(length: ${object.asWeakArray.length})',
+      ObjRef(:final vmType) => vmType,
+      _ => null,
+    };
   }
 
-  /// Describes the given InboundReference [inboundRef] and its parentListIndex,
-  /// [offset], and parentField where applicable.
-  String _inboundRefDescription(InboundReference inboundRef, int? offset) {
-    final parentListIndex = inboundRef.parentListIndex;
-    if (parentListIndex != null) {
-      return 'Referenced by ${_parentListElementDescription(
-        parentListIndex,
-        inboundRef.source,
-      )}';
+  static String? _textForInstanceRef(InstanceRef instance) {
+    final valueAsString = instance.valueAsString;
+    switch (instance.kind) {
+      case InstanceKind.kList:
+        return 'List(length: ${instance.length})';
+      case InstanceKind.kMap:
+        return 'Map(length: ${instance.length})';
+      case InstanceKind.kRecord:
+        return 'Record';
+      case InstanceKind.kType:
+      case InstanceKind.kTypeParameter:
+        return instance.name;
+      case InstanceKind.kStackTrace:
+        final trace = stack_trace.Trace.parse(valueAsString!);
+        final depth = trace.frames.length;
+        return 'StackTrace ($depth ${pluralize('frame', depth)})';
+      default:
+        return valueAsString ?? '${instance.classRef!.name}';
     }
+  }
 
-    final description = StringBuffer('Referenced by ');
+  TextSpan buildTextSpan(BuildContext context) {
+    final theme = Theme.of(context);
 
-    if (offset != null) {
-      description.write(
-        'offset $offset of ',
-      );
+    String? text =
+        textBuilder?.call(object) ??
+        defaultTextBuilder(object, preferUri: preferUri);
+
+    // Sentinels aren't objects that can be inspected.
+    final isServiceObject = object is! Sentinel && text != null;
+    text ??= object.toString();
+
+    final TextStyle style;
+    if (isServiceObject) {
+      style = theme.linkTextStyle;
+    } else {
+      style = theme.regularTextStyle;
     }
-
-    if (inboundRef.parentField != null) {
-      description.write(
-        '${_objectName(inboundRef.parentField)} of ',
-      );
-    }
-
-    description.write(
-      _objectDescription(inboundRef.source) ?? '<object>',
+    return TextSpan(
+      text: text,
+      style: style.apply(overflow: TextOverflow.ellipsis),
+      recognizer:
+          isServiceObject
+              ? (TapGestureRecognizer()
+                ..onTap = () async {
+                  final obj = object;
+                  if (obj is ObjRef) {
+                    await onTap(obj);
+                  }
+                })
+              : null,
     );
+  }
 
-    return description.toString();
+  @override
+  Widget build(BuildContext context) {
+    return RichText(
+      maxLines: 1,
+      text: TextSpan(children: [buildTextSpan(context)]),
+    );
   }
 }
 
@@ -600,6 +730,8 @@ class InboundReferencesWidget extends StatelessWidget {
 /// layout of information widgets related to VM object types.
 class VmObjectDisplayBasicLayout extends StatelessWidget {
   const VmObjectDisplayBasicLayout({
+    super.key,
+    required this.controller,
     required this.object,
     required this.generalDataRows,
     this.sideCardDataRows,
@@ -608,6 +740,7 @@ class VmObjectDisplayBasicLayout extends StatelessWidget {
     this.expandableWidgets,
   });
 
+  final ObjectInspectorViewController controller;
   final VmObject object;
   final List<MapEntry<String, WidgetBuilder>> generalDataRows;
   final List<MapEntry<String, WidgetBuilder>>? sideCardDataRows;
@@ -617,104 +750,257 @@ class VmObjectDisplayBasicLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return ListView(
       children: [
         IntrinsicHeight(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Flexible(
-                child: VMInfoCard(
-                  title: generalInfoTitle,
-                  rowKeyValues: generalDataRows,
+                child: OutlineDecoration(
+                  showLeft: false,
+                  showTop: false,
+                  showRight: sideCardDataRows != null,
+                  child: VMInfoCard(
+                    title: generalInfoTitle,
+                    rowKeyValues: generalDataRows,
+                    roundedTopBorder: false,
+                  ),
                 ),
               ),
               if (sideCardDataRows != null)
                 Flexible(
-                  child: VMInfoCard(
-                    title: sideCardTitle,
-                    rowKeyValues: sideCardDataRows,
+                  child: OutlineDecoration.onlyBottom(
+                    child: VMInfoCard(
+                      title: sideCardTitle,
+                      rowKeyValues: sideCardDataRows,
+                    ),
                   ),
                 ),
             ],
           ),
         ),
-        Flexible(
-          child: ListView(
-            children: [
-              RetainingPathWidget(
-                retainingPath: object.retainingPath,
-                onExpanded: _onExpandRetainingPath,
-              ),
-              InboundReferencesWidget(
-                inboundReferences: object.inboundReferences,
-                onExpanded: _onExpandInboundRefs,
-              ),
-              ...?expandableWidgets,
-            ],
-          ),
+        RetainingPathWidget(
+          controller: controller,
+          retainingPath: object.retainingPath,
+          onExpanded: _onExpandRetainingPath,
         ),
+        InboundReferencesTree(
+          controller: controller,
+          object: object,
+          onExpanded: _onExpandInboundRefs,
+        ),
+        ...?expandableWidgets,
       ],
     );
   }
 
-  void _onExpandRetainingPath(bool expanded) {
+  void _onExpandRetainingPath(bool _) {
     if (object.retainingPath.value == null) {
-      object.requestRetainingPath();
+      unawaited(object.requestRetainingPath());
     }
   }
 
-  void _onExpandInboundRefs(bool expanded) {
-    if (object.inboundReferences.value == null) {
-      object.requestInboundsRefs();
+  void _onExpandInboundRefs(bool _) {
+    if (object.inboundReferencesTree.value.isEmpty) {
+      unawaited(object.requestInboundsRefs());
     }
   }
 }
 
+MapEntry<String, WidgetBuilder> shallowSizeRowBuilder(VmObject object) {
+  return selectableTextBuilderMapEntry(
+    'Shallow Size',
+    prettyPrintBytes(object.obj.size ?? 0, includeUnit: true, maxBytes: 512),
+  );
+}
+
+MapEntry<String, WidgetBuilder> reachableSizeRowBuilder(VmObject object) {
+  return MapEntry(
+    'Reachable Size',
+    (context) => RequestableSizeWidget(
+      fetching: object.fetchingReachableSize,
+      sizeProvider: () => object.reachableSize,
+      requestFunction: object.requestReachableSize,
+    ),
+  );
+}
+
+MapEntry<String, WidgetBuilder> retainedSizeRowBuilder(VmObject object) {
+  return MapEntry(
+    'Retained Size',
+    (context) => RequestableSizeWidget(
+      fetching: object.fetchingRetainedSize,
+      sizeProvider: () => object.retainedSize,
+      requestFunction: object.requestRetainedSize,
+    ),
+  );
+}
+
 List<MapEntry<String, WidgetBuilder>> vmObjectGeneralDataRows(
+  ObjectInspectorViewController controller,
   VmObject object,
 ) {
   return [
     selectableTextBuilderMapEntry('Object Class', object.obj.type),
-    selectableTextBuilderMapEntry(
-      'Shallow Size',
-      prettyPrintBytes(
-        object.obj.size ?? 0,
-        includeUnit: true,
-        kbFractionDigits: 1,
-        maxBytes: 512,
+    shallowSizeRowBuilder(object),
+    reachableSizeRowBuilder(object),
+    retainedSizeRowBuilder(object),
+    if (object is ClassObject && object.obj.library != null)
+      serviceObjectLinkBuilderMapEntry(
+        controller: controller,
+        key: 'Library',
+        object: object.obj.library!,
       ),
-    ),
-    MapEntry(
-      'Reachable Size',
-      (context) => RequestableSizeWidget(
-        fetching: object.fetchingReachableSize,
-        sizeProvider: () => object.reachableSize,
-        requestFunction: object.requestReachableSize,
+    if (object is ScriptObject)
+      serviceObjectLinkBuilderMapEntry(
+        controller: controller,
+        key: 'Library',
+        object: object.obj.library!,
       ),
-    ),
-    MapEntry(
-      'Retained Size',
-      (context) => RequestableSizeWidget(
-        fetching: object.fetchingRetainedSize,
-        sizeProvider: () => object.retainedSize,
-        requestFunction: object.requestRetainedSize,
+    if (object is FieldObject)
+      serviceObjectLinkBuilderMapEntry(
+        controller: controller,
+        key: 'Owner',
+        object: object.obj.owner!,
       ),
-    ),
-    if (object is ClassObject || object is ScriptObject)
-      selectableTextBuilderMapEntry(
-        'Library',
-        _objectName((object.obj as dynamic).library),
+    if (object is FuncObject)
+      serviceObjectLinkBuilderMapEntry(
+        controller: controller,
+        key: 'Owner',
+        object: object.obj.owner!,
       ),
-    if (object is FieldObject || object is FuncObject)
-      selectableTextBuilderMapEntry(
-        'Owner',
-        _ownerName(object),
-      ),
-    if (object is! ScriptObject && object is! LibraryObject)
-      selectableTextBuilderMapEntry(
-        'Script',
-        '${fileNameFromUri(object.script?.uri) ?? ''}:${object.pos?.toString() ?? ''}',
+    if (object is! ScriptObject &&
+        object is! LibraryObject &&
+        object.script != null)
+      serviceObjectLinkBuilderMapEntry(
+        controller: controller,
+        key: 'Script',
+        object: object.script!,
+        textBuilder: (s) {
+          final script = s as ScriptRef;
+          return '${fileNameFromUri(script.uri) ?? ''}:${object.pos?.toString() ?? ''}';
+        },
       ),
   ];
+}
+
+/// Creates a simple [CodeView] which displays the code relevant to [object] in
+/// [script].
+///
+/// If [object] is synthetic and doesn't have actual token positions,
+/// [object]'s owner's code will be displayed instead.
+class ObjectInspectorCodeView extends StatefulWidget {
+  ObjectInspectorCodeView({
+    required this.codeViewController,
+    required this.script,
+    required this.object,
+    required this.child,
+  }) : super(key: ValueKey(object));
+
+  final CodeViewController codeViewController;
+  final ScriptRef script;
+  final ObjRef object;
+  final Widget child;
+
+  @override
+  State<ObjectInspectorCodeView> createState() =>
+      _ObjectInspectorCodeViewState();
+}
+
+class _ObjectInspectorCodeViewState extends State<ObjectInspectorCodeView> {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    unawaited(_maybeResetScriptLocation());
+  }
+
+  @override
+  void didUpdateWidget(ObjectInspectorCodeView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    unawaited(_maybeResetScriptLocation());
+  }
+
+  Future<void> _maybeResetScriptLocation() async {
+    if (widget.script != widget.codeViewController.currentScriptRef.value) {
+      await widget.codeViewController.resetScriptLocation(
+        ScriptLocation(widget.script),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ParsedScript?>(
+      valueListenable: widget.codeViewController.currentParsedScript,
+      builder: (context, currentParsedScript, _) {
+        LineRange? lineRange;
+        if (currentParsedScript != null) {
+          final obj = widget.object;
+          SourceLocation? location;
+          if (obj is ClassRef) {
+            location = obj.location!;
+          } else if (obj is FuncRef) {
+            location = obj.location!;
+            // If there's no line associated with the location, we're likely
+            // dealing with an artificial field / method like a constructor.
+            // We'll display the owner's code instead of showing nothing,
+            // although showing a "No Source Available" message is another
+            // option.
+            final owner = obj.owner;
+            if (location.line == null && owner is ClassRef) {
+              location = owner.location;
+            }
+          } else if (obj is FieldRef) {
+            location = obj.location!;
+            // If there's no line associated with the location, we're likely
+            // dealing with an artificial field / method like a constructor.
+            // We'll display the owner's code instead of showing nothing,
+            // although showing a "No Source Available" message is another
+            // option.
+            final owner = obj.owner;
+            if (location.line == null && owner is ClassRef) {
+              location = owner.location;
+            }
+          }
+
+          if (location != null &&
+              location.line != null &&
+              location.endTokenPos != null) {
+            final script = currentParsedScript.script;
+            final startLine = location.line!;
+            final endLine =
+                script.getLineNumberFromTokenPos(location.endTokenPos!)!;
+            lineRange = LineRange(startLine, endLine);
+          }
+        }
+
+        return SplitPane(
+          axis: Axis.vertical,
+          initialFractions: const [0.5, 0.5],
+          children: [
+            OutlineDecoration.onlyBottom(child: widget.child),
+            Column(
+              children: [
+                const AreaPaneHeader(
+                  roundedTopBorder: false,
+                  title: Text('Code Preview'),
+                ),
+                Expanded(
+                  child: CodeView(
+                    codeViewController: widget.codeViewController,
+                    scriptRef: widget.script,
+                    parsedScript: currentParsedScript,
+                    enableHistory: false,
+                    lineRange: lineRange,
+                    onSelected: breakpointManager.toggleBreakpoint,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
 }

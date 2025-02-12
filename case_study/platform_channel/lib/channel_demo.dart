@@ -1,20 +1,27 @@
+// Copyright 2025 The Flutter Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 class ChannelDemo extends StatefulWidget {
+  const ChannelDemo({super.key});
+
   @override
-  _ChannelDemoState createState() => _ChannelDemoState();
+  State<ChannelDemo> createState() => _ChannelDemoState();
 }
 
 class _ChannelDemoState extends State<ChannelDemo> {
   static const sendMessage = 'Send message by clicking the "Mail" button below';
 
-  BasicMessageChannel<String> _channel;
+  late BasicMessageChannel<String> _channel;
 
-  String _response;
+  late String _response;
 
   void _sendMessage() {
-    _channel.send('Message from Dart');
+    unawaited(_channel.send('Message from Dart'));
   }
 
   void _reset() {
@@ -28,9 +35,11 @@ class _ChannelDemoState extends State<ChannelDemo> {
     super.initState();
     _response = sendMessage;
     _channel = const BasicMessageChannel<String>('shuttle', StringCodec());
-    _channel.setMessageHandler((String response) {
-      setState(() => _response = response);
-      return null;
+    _channel.setMessageHandler((String? response) async {
+      if (response != null) {
+        setState(() => _response = response);
+      }
+      return '';
     });
   }
 

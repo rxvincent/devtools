@@ -1,13 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
-import 'package:flutter/material.dart';
+import 'package:devtools_app_shared/ui.dart';
+import 'package:flutter/material.dart' hide Badge;
 
-import '../../primitives/utils.dart';
-import '../../shared/common_widgets.dart';
-import '../../shared/theme.dart';
-import '../../shared/utils.dart';
+import '../../shared/globals.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/common_widgets.dart';
+import '../../shared/utils/utils.dart';
 import 'common.dart';
 import 'debugger_controller.dart';
 import 'debugger_model.dart';
@@ -16,10 +17,10 @@ double get executableLineRadius => scaleByFontFactor(1.5);
 double get breakpointRadius => scaleByFontFactor(6.0);
 
 class Breakpoints extends StatefulWidget {
-  const Breakpoints({Key? key}) : super(key: key);
+  const Breakpoints({super.key});
 
   @override
-  _BreakpointsState createState() => _BreakpointsState();
+  State<Breakpoints> createState() => _BreakpointsState();
 }
 
 class _BreakpointsState extends State<Breakpoints>
@@ -32,19 +33,20 @@ class _BreakpointsState extends State<Breakpoints>
 
   @override
   Widget build(BuildContext context) {
-    return DualValueListenableBuilder<List<BreakpointAndSourcePosition>,
-        BreakpointAndSourcePosition?>(
-      firstListenable: controller.breakpointsWithLocation,
-      secondListenable: controller.selectedBreakpoint,
-      builder: (context, breakpoints, selectedBreakpoint, _) {
+    return MultiValueListenableBuilder(
+      listenables: [
+        breakpointManager.breakpointsWithLocation,
+        controller.selectedBreakpoint,
+      ],
+      builder: (context, values, _) {
+        final breakpoints = values.first as List<BreakpointAndSourcePosition>;
+        final selectedBreakpoint =
+            values.second as BreakpointAndSourcePosition?;
         return ListView.builder(
           itemCount: breakpoints.length,
           itemExtent: defaultListItemHeight,
           itemBuilder: (_, index) {
-            return buildBreakpoint(
-              breakpoints[index],
-              selectedBreakpoint,
-            );
+            return buildBreakpoint(breakpoints[index], selectedBreakpoint);
           },
         );
       },
@@ -59,9 +61,9 @@ class _BreakpointsState extends State<Breakpoints>
     final isSelected = bp.id == selectedBreakpoint?.id;
 
     return Material(
-      color: isSelected ? theme.selectedRowColor : null,
+      color: isSelected ? theme.colorScheme.selectedRowBackgroundColor : null,
       child: InkWell(
-        onTap: () => _onBreakpointSelected(bp),
+        onTap: () async => await _onBreakpointSelected(bp),
         child: Padding(
           padding: const EdgeInsets.all(borderPadding),
           child: Row(
@@ -73,10 +75,7 @@ class _BreakpointsState extends State<Breakpoints>
                 ),
                 child: createCircleWidget(
                   breakpointRadius,
-                  (isSelected
-                          ? theme.selectedTextStyle
-                          : theme.regularTextStyle)
-                      .color,
+                  theme.colorScheme.primary,
                 ),
               ),
               Flexible(
@@ -85,15 +84,14 @@ class _BreakpointsState extends State<Breakpoints>
                   overflow: TextOverflow.ellipsis,
                   text: TextSpan(
                     text: _descriptionFor(bp),
-                    style: isSelected
-                        ? theme.selectedTextStyle
-                        : theme.regularTextStyle,
+                    style: theme.regularTextStyle,
                     children: [
                       TextSpan(
                         text: ' (${bp.scriptUri})',
-                        style: isSelected
-                            ? theme.selectedTextStyle
-                            : theme.subtleTextStyle,
+                        style:
+                            isSelected
+                                ? theme.selectedSubtleTextStyle
+                                : theme.subtleTextStyle,
                       ),
                     ],
                   ),
@@ -106,13 +104,13 @@ class _BreakpointsState extends State<Breakpoints>
     );
   }
 
-  void _onBreakpointSelected(BreakpointAndSourcePosition bp) {
-    controller.selectBreakpoint(bp);
+  Future<void> _onBreakpointSelected(BreakpointAndSourcePosition bp) async {
+    await controller.selectBreakpoint(bp);
   }
 
   String _descriptionFor(BreakpointAndSourcePosition breakpoint) {
     final scriptUri = breakpoint.scriptUri;
-    final fileName = scriptUri == null ? 'file' : scriptUri.split('/').last;
+    final fileName = scriptUri == null ? 'file' : fileNameFromUri(scriptUri);
     // Consider showing columns in the future if we allow multiple breakpoints
     // per line.
     return '$fileName:${breakpoint.line}';
@@ -120,12 +118,12 @@ class _BreakpointsState extends State<Breakpoints>
 }
 
 class BreakpointsCountBadge extends StatelessWidget {
-  const BreakpointsCountBadge({required this.breakpoints});
+  const BreakpointsCountBadge({super.key, required this.breakpoints});
 
   final List<BreakpointAndSourcePosition> breakpoints;
 
   @override
   Widget build(BuildContext context) {
-    return Badge('${nf.format(breakpoints.length)}');
+    return Badge(nf.format(breakpoints.length));
   }
 }

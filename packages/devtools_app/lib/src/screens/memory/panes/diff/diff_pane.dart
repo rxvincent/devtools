@@ -1,284 +1,188 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
-import 'package:collection/collection.dart';
+import 'dart:async';
+
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
-import '../../../../primitives/utils.dart';
-import '../../../../shared/common_widgets.dart';
-import '../../../../shared/split.dart';
-import '../../../../shared/table.dart';
-import '../../../../shared/theme.dart';
-import '../../primitives/memory_utils.dart';
-import 'model.dart';
+import '../../../../shared/analytics/constants.dart' as gac;
+import '../../../../shared/primitives/simple_items.dart';
+import '../../../../shared/ui/common_widgets.dart';
+import '../../../../shared/utils/utils.dart';
+import '../../shared/widgets/shared_memory_widgets.dart';
+import 'controller/diff_pane_controller.dart';
+import 'controller/snapshot_item.dart';
+import 'widgets/snapshot_control_pane.dart';
+import 'widgets/snapshot_list.dart';
+import 'widgets/snapshot_view.dart';
 
-/// While this pane is under construction, we do not want our users to see it.
-///
-/// Flip this flag locally to test the pane and flip back before checking in.
-/// TODO: before removing this flag add widget/golden testing for the diff pane.
-const shouldShowDiffPane = false;
+class DiffPane extends StatelessWidget {
+  const DiffPane({super.key, required this.diffController});
 
-class _DiffPaneController {
-  final scrollController = ScrollController();
-
-  /// The list contains one item that show information and all others
-  /// are snapshots.
-  final snapshots = ListValueNotifier(<DiffListItem>[InformationListItem()]);
-
-  final selectedIndex = ValueNotifier<int>(0);
-
-  /// If true, some process is going on.
-  ValueListenable<bool> get isProcessing => _isProcessing;
-  final _isProcessing = ValueNotifier<bool>(false);
-
-  DiffListItem get selected => snapshots.value[selectedIndex.value];
-
-  /// True, if the list contains snapshots, i.e. items beyond the first
-  /// informational item.
-  bool get hasSnapshots => snapshots.value.length > 1;
-
-  Future<void> takeSnapshot() async {
-    _isProcessing.value = true;
-    final future = snapshotMemory();
-    snapshots.add(
-      SnapshotListItem(
-        future,
-        _nextDisplayNumber(),
-        currentIsolateName ?? '<isolate-not-detected>',
-      ),
-    );
-    await future;
-    final newElementIndex = snapshots.value.length - 1;
-    scrollController.autoScrollToBottom();
-    selectedIndex.value = newElementIndex;
-    _isProcessing.value = false;
-  }
-
-  Future<void> clearSnapshots() async {
-    snapshots.removeRange(1, snapshots.value.length);
-    selectedIndex.value = 0;
-  }
-
-  int _nextDisplayNumber() {
-    final numbers = snapshots.value.map((e) => e.displayNumber);
-    assert(numbers.isNotEmpty);
-    return numbers.max + 1;
-  }
-
-  void deleteCurrentSnapshot() {
-    assert(selected is SnapshotListItem);
-    snapshots.removeRange(selectedIndex.value, selectedIndex.value + 1);
-    selectedIndex.value = selectedIndex.value - 1;
-  }
-}
-
-class DiffPane extends StatefulWidget {
-  const DiffPane({Key? key}) : super(key: key);
-
-  @override
-  State<DiffPane> createState() => _DiffPaneState();
-}
-
-class _DiffPaneState extends State<DiffPane> {
-  final controller = _DiffPaneController();
+  final DiffPaneController diffController;
 
   @override
   Widget build(BuildContext context) {
-    return DualValueListenableBuilder(
-      firstListenable: controller.snapshots,
-      secondListenable: controller.selectedIndex,
-      builder: (_, snapshots, index, __) {
-        return Split(
-          axis: Axis.horizontal,
-          initialFractions: const [0.2, 0.8],
-          minSizes: const [80, 80],
-          children: [
-            OutlineDecoration(
-              child: Column(
-                children: [
-                  _ListControlPane(controller: controller),
-                  Expanded(
-                    child: _SnapshotList(controller: controller),
+    return SplitPane(
+      axis: Axis.horizontal,
+      initialFractions: const [0.1, 0.9],
+      minSizes: const [80, 80],
+      children: [
+        OutlineDecoration.onlyRight(
+          child: SnapshotList(controller: diffController),
+        ),
+        OutlineDecoration.onlyLeft(
+          child: _SnapshotItemContent(controller: diffController),
+        ),
+      ],
+    );
+  }
+}
+
+class _SnapshotItemContent extends StatelessWidget {
+  const _SnapshotItemContent({required this.controller});
+
+  final DiffPaneController controller;
+
+  static final _documentationTopic = gac.MemoryEvents.diffHelp.name;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<SnapshotItem>(
+      valueListenable: controller.derived.selectedItem,
+      builder: (_, item, _) {
+        if (item is SnapshotDocItem) {
+          return Padding(
+            padding: const EdgeInsets.all(denseSpacing),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Markdown(
+                          data: _snapshotDocumentation(
+                            isDark: isDarkThemeEnabled(),
+                          ),
+                          styleSheet: MarkdownStyleSheet(
+                            p: Theme.of(context).regularTextStyle,
+                          ),
+                          onTapLink:
+                              (text, url, title) =>
+                                  unawaited(launchUrlWithErrorHandling(url!)),
+                        ),
+                      ),
+                      const SizedBox(width: densePadding),
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.only(
+                              top: defaultSpacing,
+                              right: denseSpacing,
+                            ),
+                            child: ClassTypeLegend(),
+                          ),
+                          MoreInfoLink(
+                            url: DocLinks.diff.value,
+                            gaScreenName: gac.memory,
+                            gaSelectedItemDescription: gac
+                                .topicDocumentationLink(_documentationTopic),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            OutlineDecoration(
-              child: Column(
-                children: [
-                  if (controller.selected is SnapshotListItem)
-                    _ContentControlPane(controller: controller),
-                  Expanded(
-                    child: _SnapshotListContent(item: controller.selected),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        );
+          );
+        }
+
+        return SnapshotInstanceItemPane(controller: controller);
       },
     );
   }
 }
 
-class _SnapshotList extends StatelessWidget {
-  _SnapshotList({Key? key, required this.controller}) : super(key: key);
+@visibleForTesting
+class SnapshotInstanceItemPane extends StatelessWidget {
+  const SnapshotInstanceItemPane({super.key, required this.controller});
 
-  final _DiffPaneController controller;
-  final headerHeight = 1.20 * defaultRowHeight;
+  final DiffPaneController controller;
 
   @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-      controller: controller.scrollController,
-      shrinkWrap: true,
-      itemCount: controller.snapshots.value.length,
-      itemBuilder: (context, index) {
-        return Container(
-          height: headerHeight,
-          color: controller.selectedIndex.value == index
-              ? Theme.of(context).selectedRowColor
-              : null,
-          child: InkWell(
-            canRequestFocus: false,
-            onTap: () => controller.selectedIndex.value = index,
-            child: _SnapshotListTitle(
-              item: controller.snapshots.value[index],
-              selected: index == controller.selectedIndex.value,
-            ),
+    return Column(
+      children: [
+        OutlineDecoration.onlyBottom(
+          child: Padding(
+            padding: const EdgeInsets.all(denseSpacing),
+            child: SnapshotControlPane(controller: controller),
           ),
-        );
-      },
+        ),
+        Expanded(child: SnapshotView(controller: controller)),
+      ],
     );
   }
 }
 
-class _SnapshotListTitle extends StatelessWidget {
-  const _SnapshotListTitle({
-    Key? key,
-    required this.item,
-    required this.selected,
-  }) : super(key: key);
+String _snapshotDocumentation({required bool isDark}) {
+  final filePostfix = isDark ? 'dark' : 'light';
 
-  final DiffListItem item;
+  // TODO(polina-c): remove after fixing https://github.com/flutter/flutter/issues/149866
+  const isWebProd = kIsWeb && !kDebugMode;
+  const imagePath = isWebProd ? 'assets/' : '';
+  final uploadImageUrl = '${imagePath}assets/img/doc/upload_$filePostfix.png';
 
-  final bool selected;
+  // `\v` adds vertical space
+  return '''
+Find unexpected memory usage by comparing two heap snapshots:
 
-  @override
-  Widget build(BuildContext context) {
-    final theItem = item;
-    return ValueListenableBuilder<bool>(
-      valueListenable: theItem.isProcessing,
-      builder: (_, isProcessing, __) => Row(
-        children: [
-          const SizedBox(width: denseRowSpacing),
-          if (theItem is SnapshotListItem)
-            Expanded(
-              child: Text(theItem.name, overflow: TextOverflow.ellipsis),
-            ),
-          if (theItem is InformationListItem) ...[
-            const Expanded(
-              child: Text('Snapshots', overflow: TextOverflow.ellipsis),
-            ),
-            const SizedBox(width: denseRowSpacing),
-            const Text('ⓘ'),
-            const SizedBox(width: denseRowSpacing),
-          ],
-          if (isProcessing) ...[
-            const _ProgressIndicator(),
-            const SizedBox(width: denseRowSpacing)
-          ],
-        ],
-      ),
-    );
-  }
-}
+\v
 
-class _ProgressIndicator extends StatelessWidget {
-  const _ProgressIndicator({Key? key}) : super(key: key);
+1. Understand [Dart memory concepts](https://docs.flutter.dev/tools/devtools/memory#basic-memory-concepts).
 
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: smallProgressSize,
-      height: smallProgressSize,
-      child: CircularProgressIndicator(
-        color: Theme.of(context).textTheme.bodyText1?.color,
-      ),
-    );
-  }
-}
+\v
 
-class _SnapshotListContent extends StatelessWidget {
-  const _SnapshotListContent({Key? key, required this.item}) : super(key: key);
-  final DiffListItem item;
+2. Use one of the following ways to get a **heap snapshot**:
 
-  @override
-  Widget build(BuildContext context) {
-    final itemLocal = item;
-    if (itemLocal is InformationListItem) {
-      return const Text('Introduction to snapshot diffing will be here.');
-    }
-    if (itemLocal is SnapshotListItem) {
-      return Text('Content of ${itemLocal.name} will be here.');
-    }
-    throw 'Unexpected type of the item: ${itemLocal.runtimeType}';
-  }
-}
+    a. To take snapshot of the connected application click the ● button
 
-class _ListControlPane extends StatelessWidget {
-  const _ListControlPane({Key? key, required this.controller})
-      : super(key: key);
+    b. To import a snapshot exported from DevTools or taken with
+    [auto-snapshotting](https://github.com/dart-lang/leak_tracker/blob/main/doc/USAGE.md) or
+    [writeHeapSnapshotToFile](https://api.flutter.dev/flutter/dart-developer/NativeRuntime/writeHeapSnapshotToFile.html)
+    click the ![import]($uploadImageUrl) button
 
-  final _DiffPaneController controller;
+\v
 
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: controller.isProcessing,
-      builder: (_, isProcessing, __) {
-        final showTakeSnapshot = !isProcessing;
-        final showClearAll = !isProcessing & controller.hasSnapshots;
-        return Row(
-          children: [
-            ToolbarAction(
-              icon: Icons.fiber_manual_record,
-              tooltip: 'Take heap snapshot for the selected isolate',
-              onPressed: showTakeSnapshot ? controller.takeSnapshot : null,
-            ),
-            ToolbarAction(
-              icon: Icons.block,
-              tooltip: 'Clear all snapshots',
-              onPressed: showClearAll ? controller.clearSnapshots : null,
-            )
-          ],
-        );
-      },
-    );
-  }
-}
+3. Review the snapshot:
 
-class _ContentControlPane extends StatelessWidget {
-  const _ContentControlPane({Key? key, required this.controller})
-      : super(key: key);
+    b. If you want to refine results, use the **Filter** button
 
-  final _DiffPaneController controller;
+    c. Select a class from the snapshot table to view its retaining paths
 
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: controller.isProcessing,
-      builder: (_, isProcessing, __) => Row(
-        children: [
-          ToolbarAction(
-            icon: Icons.clear,
-            tooltip: 'Delete snapshot',
-            onPressed: isProcessing ? null : controller.deleteCurrentSnapshot,
-          ),
-        ],
-      ),
-    );
-  }
+    d. View the path detail by selecting from the **Shortest Retaining Paths…** table
+
+\v
+
+4. Check the **diff** between snapshots to detect allocation issues:
+
+    a. Get **snapshots** before and after a feature execution.
+       If you are experiencing DevTools crashes due to size of snapshots,
+       switch to the [desktop version](https://github.com/flutter/devtools/blob/master/BETA_TESTING.md).
+
+    b. While viewing the second snapshot, click **Diff with:** and select the first snapshot from the drop-down menu;
+    the results area will display the diff
+
+    c. Use the **Filter** button to refine the diff results, if needed
+
+    d. Select a class from the diff to view its retaining paths, and see which objects hold the references to those instances
+''';
 }

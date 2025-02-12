@@ -1,6 +1,6 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:async';
 
@@ -17,19 +17,16 @@ class RepoCheckCommand extends Command {
 
   @override
   Future run() async {
-    final repo = DevToolsRepo.getInstance()!;
+    final repo = DevToolsRepo.getInstance();
     print('DevTools repo at ${repo.repoPath}.');
 
-    final checks = <Check>[
-      DevToolsVersionCheck(),
-      FlutterVersionCheck(),
-    ];
+    final checks = <Check>[DevToolsVersionCheck()];
 
     print('\nPerforming checks...');
 
     int failureCount = 0;
 
-    for (var check in checks) {
+    for (final check in checks) {
       print('\nchecking ${check.name}:');
 
       try {
@@ -62,14 +59,17 @@ class DevToolsVersionCheck extends Check {
   Future<void> performCheck(DevToolsRepo repo) {
     // TODO(devoncarew): Update this to use a package to parse the pubspec file;
     //                   https://pub.dev/packages/pubspec.
-    final pubspecContents = repo.readFile('packages/devtools_app/pubspec.yaml');
+    final pubspecContents = repo.readFile(
+      Uri.parse('packages/devtools_app/pubspec.yaml'),
+    );
     final versionString = pubspecContents
         .split('\n')
         .firstWhere((line) => line.startsWith('version:'));
     final pubspecVersion = versionString.substring('version:'.length).trim();
 
-    final dartFileContents =
-        repo.readFile('packages/devtools_app/lib/devtools.dart');
+    final dartFileContents = repo.readFile(
+      Uri.parse('packages/devtools_app/lib/devtools.dart'),
+    );
 
     final regexp = RegExp(r"version = '(\S+)';");
     final match = regexp.firstMatch(dartFileContents);
@@ -87,28 +87,5 @@ class DevToolsVersionCheck extends Check {
     print('  version $pubspecVersion');
 
     return Future.value();
-  }
-}
-
-/// Validate that 'flutter-version.txt' and .github/workflows/build.yaml agree
-/// - point to the same version of Flutter.
-class FlutterVersionCheck extends Check {
-  @override
-  String get name => 'flutter version';
-
-  @override
-  Future<void> performCheck(DevToolsRepo repo) async {
-    final versionFile = 'flutter-version.txt';
-    final actionFile = '.github/workflows/build.yaml';
-
-    String fileVersion = repo.readFile(versionFile).trim();
-    print('  $versionFile: $fileVersion');
-
-    String actionsContent = repo.readFile(actionFile);
-    if (!actionsContent.contains(fileVersion)) {
-      throw '$actionFile does not contain the Flutter SDK '
-          'version \'$fileVersion\'. Please make sure that the version in '
-          '$versionFile and $actionFile are in sync.';
-    }
   }
 }

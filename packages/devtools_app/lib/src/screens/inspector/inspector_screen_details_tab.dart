@@ -1,25 +1,29 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'dart:async';
+
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/material.dart';
 
-import '../../analytics/analytics.dart' as ga;
-import '../../analytics/constants.dart' as analytics_constants;
-import '../../primitives/blocking_action_mixin.dart';
-import '../../shared/common_widgets.dart';
-import '../../shared/theme.dart';
-import '../../ui/tab.dart';
+import '../../shared/analytics/analytics.dart' as ga;
+import '../../shared/analytics/constants.dart' as gac;
+import '../../shared/globals.dart';
+import '../../shared/preferences/preferences.dart';
+import '../../shared/primitives/blocking_action_mixin.dart';
+import '../../shared/ui/common_widgets.dart';
+import '../../shared/ui/tab.dart';
 import 'inspector_controller.dart';
-import 'inspector_screen.dart';
+import 'inspector_screen_body.dart';
 import 'layout_explorer/layout_explorer.dart';
 
 class InspectorDetails extends StatelessWidget {
   const InspectorDetails({
     required this.detailsTree,
     required this.controller,
-    Key? key,
-  }) : super(key: key);
+    super.key,
+  });
 
   final Widget detailsTree;
   final InspectorController controller;
@@ -27,21 +31,34 @@ class InspectorDetails extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tabs = [
-      _buildTab(tabName: 'Layout Explorer'),
-      _buildTab(
-        tabName: 'Widget Details Tree',
-        trailing: InspectorExpandCollapseButtons(controller: controller),
+      (
+        tab: _buildTab(tabName: InspectorDetailsViewType.layoutExplorer.key),
+        tabView: LayoutExplorerTab(controller: controller),
+      ),
+      (
+        tab: _buildTab(
+          tabName: InspectorDetailsViewType.widgetDetailsTree.key,
+          trailing: InspectorExpandCollapseButtons(controller: controller),
+        ),
+        tabView: detailsTree,
       ),
     ];
-    final tabViews = <Widget>[
-      LayoutExplorerTab(controller: controller),
-      detailsTree,
-    ];
+    return ValueListenableBuilder(
+      valueListenable: preferences.inspector.defaultDetailsView,
+      builder: (BuildContext context, value, Widget? child) {
+        int defaultInspectorViewIndex = 0;
 
-    return AnalyticsTabbedView(
-      tabs: tabs,
-      tabViews: tabViews,
-      gaScreen: analytics_constants.inspector,
+        if (preferences.inspector.defaultDetailsView.value ==
+            InspectorDetailsViewType.widgetDetailsTree) {
+          defaultInspectorViewIndex = 1;
+        }
+
+        return AnalyticsTabbedView(
+          tabs: tabs,
+          gaScreen: gac.inspector,
+          initialSelectedIndex: defaultInspectorViewIndex,
+        );
+      },
     );
   }
 
@@ -55,10 +72,7 @@ class InspectorDetails extends StatelessWidget {
 }
 
 class InspectorExpandCollapseButtons extends StatefulWidget {
-  const InspectorExpandCollapseButtons({
-    Key? key,
-    required this.controller,
-  }) : super(key: key);
+  const InspectorExpandCollapseButtons({super.key, required this.controller});
 
   final InspectorController controller;
 
@@ -68,59 +82,62 @@ class InspectorExpandCollapseButtons extends StatefulWidget {
 }
 
 class _InspectorExpandCollapseButtonsState
-    extends State<InspectorExpandCollapseButtons> with BlockingActionMixin {
-  bool get enableButtons => actionInProgress == false;
+    extends State<InspectorExpandCollapseButtons>
+    with BlockingActionMixin {
+  bool get enableButtons => !actionInProgress;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       alignment: Alignment.centerRight,
       decoration: BoxDecoration(
-        border: Border(
-          left: defaultBorderSide(Theme.of(context)),
-        ),
+        border: Border(left: defaultBorderSide(Theme.of(context))),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            child: IconLabelButton(
+            child: GaDevToolsButton(
               icon: Icons.unfold_more,
               onPressed: enableButtons ? _onExpandClick : null,
               label: 'Expand all',
               minScreenWidthForTextBeforeScaling:
                   InspectorScreenBodyState.minScreenWidthForTextBeforeScaling,
+              gaScreen: gac.inspector,
+              gaSelection: gac.expandAll,
               outlined: false,
             ),
           ),
           const SizedBox(width: denseSpacing),
           SizedBox(
-            child: IconLabelButton(
+            child: GaDevToolsButton(
               icon: Icons.unfold_less,
               onPressed: enableButtons ? _onCollapseClick : null,
               label: 'Collapse to selected',
               minScreenWidthForTextBeforeScaling:
                   InspectorScreenBodyState.minScreenWidthForTextBeforeScaling,
+              gaScreen: gac.inspector,
+              gaSelection: gac.collapseAll,
               outlined: false,
             ),
-          )
+          ),
         ],
       ),
     );
   }
 
   void _onExpandClick() {
-    blockWhileInProgress(() async {
-      ga.select(analytics_constants.inspector, analytics_constants.expandAll);
-      await widget.controller.expandAllNodesInDetailsTree();
-    });
+    unawaited(
+      blockWhileInProgress(() async {
+        ga.select(gac.inspector, gac.expandAll);
+        await widget.controller.expandAllNodesInDetailsTree();
+      }),
+    );
   }
 
   void _onCollapseClick() {
-    blockWhileInProgress(() async {
-      ga.select(analytics_constants.inspector, analytics_constants.collapseAll);
-      await widget.controller.collapseDetailsToSelected();
-    });
+    ga.select(gac.inspector, gac.collapseAll);
+    widget.controller.collapseDetailsToSelected();
   }
 }
