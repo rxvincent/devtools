@@ -1,15 +1,15 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:typed_data';
 
 import 'package:devtools_app/devtools_app.dart';
-import 'package:devtools_app/src/http/curl_command.dart';
+import 'package:devtools_app/src/shared/http/curl_command.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vm_service/vm_service.dart';
 
-import '../test_data/network.dart';
+import '../test_infra/test_data/network.dart';
 
 void main() {
   group('NetworkCurlCommand', () {
@@ -49,7 +49,7 @@ void main() {
           uri: Uri.parse('https://www.example.com'),
           headers: {
             'accept-language': ['en-GB,de-DE'],
-            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)']
+            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)'],
           },
         ),
       );
@@ -67,7 +67,7 @@ void main() {
           uri: Uri.parse('https://www.example.com'),
           headers: {
             'accept-language': ['en-GB,de-DE'],
-            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)']
+            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)'],
           },
           requestBody: Uint8List.fromList(
             'It\'s a request body!\nHopefully this works.'.codeUnits,
@@ -122,7 +122,7 @@ void main() {
           uri: Uri.parse('https://www.example.com/search?q=\'test\''),
           headers: {
             'accept-language': ['en-GB,de-DE'],
-            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)']
+            'user-agent': ['SomeUserAgent/5.0 (Macintosh; Intel Mac OS X)'],
           },
         ),
       );
@@ -140,7 +140,7 @@ void main() {
           uri: Uri.parse('https://www.example.com'),
           headers: {
             'accept-language': ['en-GB,de-DE'],
-            'authorization': ['Bearer \'this is a\' test']
+            'authorization': ['Bearer \'this is a\' test'],
           },
         ),
       );
@@ -158,7 +158,7 @@ void main() {
           uri: Uri.parse('https://www.example.com'),
           headers: {
             'accept-language': ['en-GB,de-DE'],
-            'authorization': ['Bearer \'this is a\' test']
+            'authorization': ['Bearer \'this is a\' test'],
           },
           requestBody: Uint8List(0),
         ),
@@ -193,7 +193,7 @@ void main() {
 
       expect(
         command.toString(),
-        "curl --location --request GET \'https://jsonplaceholder.typicode.com/albums/1\' \\\n--header 'content-length: 0'",
+        "curl --location --request GET 'https://jsonplaceholder.typicode.com/albums/1?userId=1&title=myalbum' \\\n--header 'content-length: 0'",
       );
     });
 
@@ -202,17 +202,14 @@ void main() {
 
       expect(
         command.toString(),
-        "curl --location --request POST \'https://jsonplaceholder.typicode.com/posts\' \\\n--data-raw '    {\n      title: '\\''foo'\\'',\n      body: '\\''bar'\\'',\n      userId: 1,\n    }\n    '",
+        "curl --location --request POST 'https://jsonplaceholder.typicode.com/posts' \\\n--data-raw '{\n \"title\": \"foo\", \"body\": \"bar\", \"userId\": 1\n}\n '",
       );
     });
   });
 }
 
 class _TestDartIOHttpRequestData extends DartIOHttpRequestData {
-  _TestDartIOHttpRequestData(
-    int timelineMicrosBase,
-    this._request,
-  ) : super(timelineMicrosBase, _request);
+  _TestDartIOHttpRequestData(this._request) : super(_request);
 
   final HttpProfileRequest _request;
 
@@ -244,16 +241,15 @@ DartIOHttpRequestData _testDartIOHttpRequestData({
   List<String>? cookies,
 }) {
   return _TestDartIOHttpRequestData(
-    0,
     HttpProfileRequest(
-      id: 0,
+      id: '0',
       isolateId: '0',
       method: method,
       uri: uri,
       requestBody: requestBody,
-      responseBody: null,
-      startTime: 0,
-      endTime: 0,
+      events: [],
+      startTime: DateTime.fromMicrosecondsSinceEpoch(0),
+      endTime: DateTime.fromMicrosecondsSinceEpoch(0),
       response: HttpProfileResponseData(
         compressionState: '',
         connectionInfo: {},
@@ -264,9 +260,9 @@ DartIOHttpRequestData _testDartIOHttpRequestData({
         persistentConnection: false,
         reasonPhrase: '',
         redirects: [],
-        startTime: 0,
+        startTime: DateTime.fromMicrosecondsSinceEpoch(0),
         statusCode: 200,
-        endTime: 0,
+        endTime: DateTime.fromMicrosecondsSinceEpoch(0),
       ),
       request: HttpProfileRequestData.buildSuccessfulRequest(
         headers: headers ?? {},
@@ -275,9 +271,7 @@ DartIOHttpRequestData _testDartIOHttpRequestData({
         cookies: cookies ?? [],
         followRedirects: false,
         maxRedirects: 0,
-        method: method,
         persistentConnection: false,
-        events: [],
       ),
     ),
   );

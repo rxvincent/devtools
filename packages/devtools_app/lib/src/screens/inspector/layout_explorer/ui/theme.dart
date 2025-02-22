@@ -1,13 +1,11 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/material.dart';
 
-import '../../../../shared/theme.dart';
-import '../../../../shared/utils.dart';
-
-const margin = 8.0;
+const margin = 6.0;
 
 double get arrowHeadSize => scaleByFontFactor(8.0);
 double get arrowMargin => scaleByFontFactor(4.0);
@@ -40,15 +38,10 @@ double get heightOnlyIndicatorSize => scaleByFontFactor(72.0);
 double get minWidthToDisplayWidthInsideArrow => scaleByFontFactor(200.0);
 double get minHeightToDisplayHeightInsideArrow => scaleByFontFactor(200.0);
 
-const largeTextScaleFactor = 1.2;
 const smallTextScaleFactor = 0.8;
 
 /// Height for limiting asset image (selected one in the drop down).
 double get axisAlignmentAssetImageHeight => scaleByFontFactor(24.0);
-
-/// Width for limiting asset image (when drop down menu is open for the vertical).
-double get axisAlignmentAssetImageWidth => scaleByFontFactor(96.0);
-double get dropdownMaxSize => scaleByFontFactor(220.0);
 
 double get minHeightToAllowTruncating => scaleByFontFactor(375.0);
 double get minWidthToAllowTruncating => scaleByFontFactor(375.0);
@@ -56,11 +49,6 @@ double get minWidthToAllowTruncating => scaleByFontFactor(375.0);
 // Story of Layout colors
 const mainAxisLightColor = Color(0xff2c5daa);
 const mainAxisDarkColor = Color(0xff2c5daa);
-const rowColor = Color(0xff2c5daa);
-const columnColor = Color(0xff77974d);
-const regularWidgetColor = Color(0xff88b1de);
-
-const selectedWidgetColor = Color(0xff36c6f4);
 
 const textColor = Color(0xff55767f);
 const emphasizedTextColor = Color(0xff009aca);
@@ -108,9 +96,6 @@ extension LayoutExplorerColorScheme on ColorScheme {
   Color get backgroundColorSelected =>
       isLight ? backgroundColorSelectedLight : backgroundColorSelectedDark;
 
-  Color get backgroundColor =>
-      isLight ? backgroundColorLight : backgroundColorDark;
-
   Color get unconstrainedColor =>
       isLight ? unconstrainedLightColor : unconstrainedDarkColor;
 }
@@ -124,17 +109,16 @@ const unconstrainedLightColor = Color(0xfff5846b);
 const widthIndicatorColor = textColor;
 const heightIndicatorColor = textColor;
 
-extension LayoutThemeDataExtension on ThemeData {}
-
 const negativeSpaceDarkAssetName =
     'assets/img/layout_explorer/negative_space_dark.png';
 const negativeSpaceLightAssetName =
     'assets/img/layout_explorer/negative_space_light.png';
 
-const dimensionIndicatorTextStyle = TextStyle(
+final dimensionIndicatorTextStyle = TextStyle(
   height: 1.0,
   letterSpacing: 1.1,
   color: emphasizedTextColor,
+  fontSize: defaultFontSize,
 );
 
 TextStyle overflowingDimensionIndicatorTextStyle(ColorScheme colorScheme) =>
@@ -149,12 +133,7 @@ Widget buildUnderline() {
   return Container(
     height: 1.0,
     decoration: const BoxDecoration(
-      border: Border(
-        bottom: BorderSide(
-          color: textColor,
-          width: 0.0,
-        ),
-      ),
+      border: Border(bottom: BorderSide(color: textColor, width: 0.0)),
     ),
   );
 }

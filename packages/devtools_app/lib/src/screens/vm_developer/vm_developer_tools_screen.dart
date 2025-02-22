@@ -1,29 +1,21 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../../primitives/auto_dispose_mixin.dart';
-import '../../shared/screen.dart';
-import '../../shared/theme.dart';
-import '../../shared/utils.dart';
-import 'isolate_statistics_view.dart';
-import 'object_inspector_view.dart';
+import '../../shared/framework/screen.dart';
+import '../../shared/globals.dart';
+import 'isolate_statistics/isolate_statistics_view.dart';
+import 'object_inspector/object_inspector_view.dart';
+import 'process_memory/process_memory_view.dart';
 import 'vm_developer_tools_controller.dart';
-import 'vm_statistics_view.dart';
-
-const displayObjectInspector = false;
+import 'vm_statistics/vm_statistics_view.dart';
 
 abstract class VMDeveloperView {
-  const VMDeveloperView(
-    this.screenId, {
-    required this.title,
-    required this.icon,
-  });
-
-  final String screenId;
+  const VMDeveloperView({required this.title, required this.icon});
 
   /// The user-facing name of the page.
   final String title;
@@ -41,81 +33,59 @@ abstract class VMDeveloperView {
 }
 
 class VMDeveloperToolsScreen extends Screen {
-  const VMDeveloperToolsScreen({
-    required this.controller,
-  }) : super.conditional(
-          id: id,
-          title: 'VM Tools',
-          icon: Icons.settings_applications,
-          requiresVmDeveloperMode: true,
-        );
+  VMDeveloperToolsScreen() : super.fromMetaData(ScreenMetaData.vmTools);
 
-  static const id = 'vm-tools';
-
-  final VMDeveloperToolsController controller;
+  static final id = ScreenMetaData.vmTools.id;
 
   @override
   ValueListenable<bool> get showIsolateSelector =>
-      controller.showIsolateSelector;
+      VMDeveloperToolsController.showIsolateSelector;
 
   @override
-  Widget build(BuildContext context) => const VMDeveloperToolsScreenBody();
+  Widget buildScreenBody(BuildContext context) =>
+      const VMDeveloperToolsScreenBody();
 }
 
-class VMDeveloperToolsScreenBody extends StatefulWidget {
-  const VMDeveloperToolsScreenBody();
+class VMDeveloperToolsScreenBody extends StatelessWidget {
+  const VMDeveloperToolsScreenBody({super.key});
 
-  static List<VMDeveloperView> views = [
+  static final views = <VMDeveloperView>[
     const VMStatisticsView(),
     const IsolateStatisticsView(),
-    if (displayObjectInspector) ObjectInspectorView(),
+    ObjectInspectorView(),
+    const VMProcessMemoryView(),
   ];
 
   @override
-  _VMDeveloperToolsScreenState createState() => _VMDeveloperToolsScreenState();
-}
-
-class _VMDeveloperToolsScreenState extends State<VMDeveloperToolsScreenBody>
-    with
-        AutoDisposeMixin,
-        ProvidedControllerMixin<VMDeveloperToolsController,
-            VMDeveloperToolsScreenBody> {
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    initController();
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final controller = screenControllers.lookup<VMDeveloperToolsController>();
     return ValueListenableBuilder<int>(
       valueListenable: controller.selectedIndex,
       builder: (context, selectedIndex, _) {
         return Row(
           children: [
-            if (VMDeveloperToolsScreenBody.views.length > 1)
+            if (views.length > 1)
               NavigationRail(
                 selectedIndex: selectedIndex,
-                elevation: 10.0,
                 labelType: NavigationRailLabelType.all,
                 onDestinationSelected: controller.selectIndex,
                 destinations: [
-                  for (final view in VMDeveloperToolsScreenBody.views)
+                  for (final view in views)
                     NavigationRailDestination(
                       label: Text(view.title),
                       icon: Icon(view.icon),
-                    )
+                    ),
                 ],
               ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.only(
-                  left: defaultSpacing,
+                padding: const EdgeInsets.only(left: defaultSpacing),
+                child: IndexedStack(
+                  index: selectedIndex,
+                  children: [for (final view in views) view.build(context)],
                 ),
-                child: VMDeveloperToolsScreenBody.views[selectedIndex]
-                    .build(context),
               ),
-            )
+            ),
           ],
         );
       },

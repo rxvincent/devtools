@@ -6,12 +6,17 @@ doc/api/
 
 # Generated files not intended to be checked in to version control
 .flutter-plugins-dependencies
-android/
-ios/
-lib/generated_plugin_registrant.dart
-macos/Runner/
-macos/Flutter/
+test/widget_test.dart
+.metadata
 
-# This should only be present as a byproduct of running the publish
-# script. It should not be committed.
-fonts/codicon.ttf
+# Platforms related
+android/**/*
+ios/**/*
+linux/**/*
+windows/**/*
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/

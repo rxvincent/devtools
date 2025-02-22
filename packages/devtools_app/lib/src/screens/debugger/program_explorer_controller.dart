@@ -1,16 +1,15 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:async';
 
+import 'package:devtools_app_shared/utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:vm_service/vm_service.dart';
 
-import '../../primitives/auto_dispose.dart';
-import '../../primitives/trees.dart';
-import '../../primitives/utils.dart';
 import '../../shared/globals.dart';
+import '../../shared/primitives/trees.dart';
 import '../vm_developer/vm_service_private_extensions.dart';
 import 'program_explorer_model.dart';
 
@@ -18,9 +17,7 @@ class ProgramExplorerController extends DisposableController
     with AutoDisposeControllerMixin {
   /// [showCodeNodes] controls whether or not [Code] nodes are displayed in the
   /// outline view.
-  ProgramExplorerController({
-    this.showCodeNodes = false,
-  });
+  ProgramExplorerController({this.showCodeNodes = false});
 
   /// The outline view nodes for the currently selected library.
   ValueListenable<List<VMServiceObjectNode>> get outlineNodes => _outlineNodes;
@@ -30,22 +27,21 @@ class ProgramExplorerController extends DisposableController
   final _isLoadingOutline = ValueNotifier<bool>(false);
 
   /// The currently selected node in the Program Explorer file picker.
+  @visibleForTesting
+  VMServiceObjectNode? get scriptSelection => _scriptSelection;
   VMServiceObjectNode? _scriptSelection;
-
-  /// The currently selected node in the Program Explorer outline.
-  ValueListenable<VMServiceObjectNode?> get outlineSelection =>
-      _outlineSelection;
-  final _outlineSelection = ValueNotifier<VMServiceObjectNode?>(null);
 
   /// The processed roots of the tree.
   ValueListenable<List<VMServiceObjectNode>> get rootObjectNodes =>
-      _rootObjectNodes;
-  final _rootObjectNodes = ListValueNotifier<VMServiceObjectNode>([]);
+      rootObjectNodesInternal;
+  @visibleForTesting
+  final rootObjectNodesInternal = ListValueNotifier<VMServiceObjectNode>([]);
 
   ValueListenable<int> get selectedNodeIndex => _selectedNodeIndex;
   final _selectedNodeIndex = ValueNotifier<int>(0);
 
-  IsolateRef? _isolate;
+  /// The currently selected node in the Program Explorer outline.
+  VMServiceObjectNode? _outlineSelection;
 
   /// Notifies that the controller has finished initializing.
   ValueListenable<bool> get initialized => _initialized;
@@ -67,26 +63,29 @@ class ProgramExplorerController extends DisposableController
   }
 
   /// Initializes the program structure.
-  void initialize() {
+  Future<void> initialize() async {
     if (_initializing) {
       return;
     }
     _initializing = true;
 
-    _isolate = serviceManager.isolateManager.selectedIsolate.value;
-    final libraries = _isolate != null
-        ? serviceManager.isolateManager
-            .isolateDebuggerState(_isolate)!
-            .isolateNow!
-            .libraries!
-        : <LibraryRef>[];
+    final isolate =
+        serviceConnection.serviceManager.isolateManager.selectedIsolate.value;
+    final libraries =
+        isolate != null
+            ? serviceConnection.serviceManager.isolateManager
+                .isolateState(isolate)
+                .isolateNow!
+                .libraries!
+            : <LibraryRef>[];
+
+    if (scriptManager.sortedScripts.value.isEmpty && isolate != null) {
+      await scriptManager.retrieveAndSortScripts(isolate);
+    }
 
     // Build the initial tree.
-    final nodes = VMServiceObjectNode.createRootsFrom(
-      this,
-      libraries,
-    );
-    _rootObjectNodes.replaceAll(nodes);
+    final nodes = VMServiceObjectNode.createRootsFrom(this, libraries);
+    rootObjectNodesInternal.replaceAll(nodes);
     _initialized.value = true;
   }
 
@@ -94,25 +93,27 @@ class ProgramExplorerController extends DisposableController
     // Re-initialize after reload.
     // TODO(elliette): If file was opened from before the reload, we should try
     // to open that one instead of the entrypoint file.
-    addAutoDisposeListener(
-      scriptManager.sortedScripts,
-      refresh,
-    );
+    addAutoDisposeListener(scriptManager.sortedScripts, refresh);
   }
 
   Future<void> selectScriptNode(ScriptRef? script) async {
     if (!initialized.value) {
       return;
     }
-    await _selectScriptNode(script, _rootObjectNodes.value);
-    _rootObjectNodes.notifyListeners();
+    if (script == null) {
+      clearSelection();
+      return;
+    }
+    await _selectScriptNode(script, rootObjectNodesInternal.value);
+    rootObjectNodesInternal.notifyListeners();
   }
 
   Future<void> _selectScriptNode(
     ScriptRef? script,
     List<VMServiceObjectNode> nodes,
   ) async {
-    final searchCondition = (node) => node.script?.uri == script!.uri;
+    bool searchCondition(VMServiceObjectNode node) =>
+        node.script?.uri == script!.uri;
     for (final node in nodes) {
       final result = node.firstChildWithCondition(searchCondition);
       if (result != null) {
@@ -127,20 +128,25 @@ class ProgramExplorerController extends DisposableController
     }
   }
 
+  VMServiceObjectNode? findOutlineNode(ObjRef object) {
+    return breadthFirstSearchObject(object, _outlineNodes.value);
+  }
+
   int _calculateNodeIndex({
-    bool matchingNodeCondition(VMServiceObjectNode node)?,
+    bool Function(VMServiceObjectNode node)? matchingNodeCondition,
     bool includeCollapsedNodes = true,
   }) {
     // Index tracks the position of the node in the flat-list representation of
     // the tree:
     var index = 0;
-    for (final node in _rootObjectNodes.value) {
+    for (final node in rootObjectNodesInternal.value) {
       final matchingNode = depthFirstTraversal(
         node,
         returnCondition: matchingNodeCondition,
-        exploreChildrenCondition: includeCollapsedNodes
-            ? null
-            : (VMServiceObjectNode node) => node.isExpanded,
+        exploreChildrenCondition:
+            includeCollapsedNodes
+                ? null
+                : (VMServiceObjectNode node) => node.isExpanded,
         action: (VMServiceObjectNode _) => index++,
       );
       if (matchingNode != null) return index;
@@ -150,14 +156,28 @@ class ProgramExplorerController extends DisposableController
   }
 
   /// Clears controller state and re-initializes.
-  void refresh() {
+  Future<void> refresh() {
     _scriptSelection = null;
-    _outlineSelection.value = null;
+    _outlineSelection = null;
     _isLoadingOutline.value = true;
     _outlineNodes.clear();
     _initialized.value = false;
     _initializing = false;
     return initialize();
+  }
+
+  void clearSelection() {
+    _scriptSelection?.unselect();
+    _scriptSelection = null;
+    _outlineNodes.clear();
+    _outlineSelection = null;
+    rootObjectNodesInternal.notifyListeners();
+  }
+
+  void clearOutlineSelection() {
+    _outlineSelection?.unselect();
+    _outlineSelection = null;
+    _outlineNodes.notifyListeners();
   }
 
   /// Marks [node] as the currently selected node, clearing the selection state
@@ -172,7 +192,7 @@ class ProgramExplorerController extends DisposableController
       _scriptSelection?.unselect();
       _scriptSelection = node;
       _isLoadingOutline.value = true;
-      _outlineSelection.value = null;
+      _outlineSelection = null;
       final newOutlineNodes = await _scriptSelection!.outline;
       if (newOutlineNodes != null) {
         _outlineNodes.replaceAll(newOutlineNodes);
@@ -185,10 +205,11 @@ class ProgramExplorerController extends DisposableController
     if (!node.isSelectable) {
       return;
     }
-    if (_outlineSelection.value != node) {
+    if (_outlineSelection != node) {
       node.select();
-      _outlineSelection.value?.unselect();
-      _outlineSelection.value = node;
+      _outlineSelection?.unselect();
+      _outlineSelection = node;
+      _outlineNodes.notifyListeners();
     }
   }
 
@@ -196,7 +217,7 @@ class ProgramExplorerController extends DisposableController
   /// [_outlineNodes] tree for the current [_scriptSelection] by
   /// collapsing and unselecting all nodes.
   void resetOutline() {
-    _outlineSelection.value = null;
+    _outlineSelection = null;
 
     for (final node in _outlineNodes.value) {
       breadthFirstTraversal<VMServiceObjectNode>(
@@ -223,77 +244,191 @@ class ProgramExplorerController extends DisposableController
   /// immediately returns.
   Future<void> populateNode(VMServiceObjectNode node) async {
     final object = node.object;
-    final service = serviceManager.service;
-    final isolateId = serviceManager.isolateManager.selectedIsolate.value!.id;
+    final service = serviceConnection.serviceManager.service;
+    final isolateId =
+        serviceConnection
+            .serviceManager
+            .isolateManager
+            .selectedIsolate
+            .value!
+            .id;
 
     Future<List<Obj>> getObjects(Iterable<ObjRef> objs) {
-      return Future.wait(
-        objs.map(
-          (o) => service!.getObject(isolateId!, o.id!),
-        ),
-      );
+      return objs.map((o) => service!.getObject(isolateId!, o.id!)).wait;
     }
 
     Future<List<Func>> getFuncs(
       Iterable<FuncRef> funcs,
       Iterable<FieldRef>? fields,
     ) async {
-      final res = await Future.wait<Func>(
-        funcs
-            .where((f) => !_isSyntheticAccessor(f, fields as List<FieldRef>))
-            .map<Future<Func>>(
-              (f) => service!.getObject(isolateId!, f.id!).then((f) async {
-                final func = f as Func;
-                final codeRef = func.code;
+      return await funcs
+          .where((f) => !_isSyntheticAccessor(f, fields as List<FieldRef>))
+          .map<Future<Func>>(
+            (f) => service!.getObject(isolateId!, f.id!).then((f) async {
+              final func = f as Func;
+              final codeRef = func.code;
 
-                // Populate the [Code] objects in each function if we want to
-                // show code nodes in the outline.
-                if (showCodeNodes && codeRef != null) {
-                  final code =
-                      await service.getObject(isolateId, codeRef.id!) as Code;
-                  func.code = code;
-                  Code unoptimizedCode = code;
-                  // `func.code` could be unoptimized code, so don't bother
-                  // fetching it again.
-                  if (func.unoptimizedCode != null &&
-                      func.unoptimizedCode?.id! != code.id!) {
-                    unoptimizedCode = await service.getObject(
-                      isolateId,
-                      func.unoptimizedCode!.id!,
-                    ) as Code;
-                  }
-                  func.unoptimizedCode = unoptimizedCode;
+              // Populate the [Code] objects in each function if we want to
+              // show code nodes in the outline.
+              if (showCodeNodes && codeRef != null) {
+                final code =
+                    await service.getObject(isolateId, codeRef.id!) as Code;
+                func.code = code;
+                Code unoptimizedCode = code;
+                // `func.code` could be unoptimized code, so don't bother
+                // fetching it again.
+                if (func.unoptimizedCode != null &&
+                    func.unoptimizedCode?.id! != code.id!) {
+                  unoptimizedCode =
+                      await service.getObject(
+                            isolateId,
+                            func.unoptimizedCode!.id!,
+                          )
+                          as Code;
                 }
-                return func;
-              }),
-            ),
-      );
-      return res.cast<Func>();
+                func.unoptimizedCode = unoptimizedCode;
+              }
+              return func;
+            }),
+          )
+          .wait;
     }
 
-    if (object == null || object is Obj) {
-      return;
-    } else if (object is LibraryRef) {
-      final lib = await service!.getObject(isolateId!, object.id!) as Library;
-      final results = await Future.wait([
-        getObjects(lib.variables!),
-        getFuncs(lib.functions!, lib.variables),
-      ]);
-      lib.variables = results[0].cast<Field>();
-      lib.functions = results[1].cast<Func>();
-      node.updateObject(lib);
-    } else if (object is ClassRef) {
-      final clazz = await service!.getObject(isolateId!, object.id!) as Class;
-      final results = await Future.wait([
-        getObjects(clazz.fields!),
-        getFuncs(clazz.functions!, clazz.fields),
-      ]);
-      clazz.fields = results[0].cast<Field>();
-      clazz.functions = results[1].cast<Func>();
-      node.updateObject(clazz);
-    } else {
-      final obj = await service!.getObject(isolateId!, object.id!);
-      node.updateObject(obj);
+    try {
+      if (object == null || object is Obj) {
+        return;
+      } else if (object is LibraryRef) {
+        final lib = await service!.getObject(isolateId!, object.id!) as Library;
+        final (variableObjects, functionObjects) =
+            await (
+              getObjects(lib.variables!),
+              getFuncs(lib.functions!, lib.variables),
+            ).wait;
+        lib.variables = variableObjects.cast<Field>();
+        lib.functions = functionObjects;
+        node.updateObject(lib);
+      } else if (object is ClassRef) {
+        final clazz = await service!.getObject(isolateId!, object.id!) as Class;
+        final (fieldObjects, functionObjects) =
+            await (
+              getObjects(clazz.fields!),
+              getFuncs(clazz.functions!, clazz.fields),
+            ).wait;
+        clazz.fields = fieldObjects.cast<Field>();
+        clazz.functions = functionObjects;
+        node.updateObject(clazz);
+      } else {
+        final obj = await service!.getObject(isolateId!, object.id!);
+        node.updateObject(obj);
+      }
+    } on RPCError {
+      // Swallow RPC errors that can be caused by the service disappearing.
     }
+  }
+
+  /// Searches and returns the script or library node in the FileExplorer
+  /// which is the source location of the target [object].
+  Future<VMServiceObjectNode> searchFileExplorer(ObjRef object) async {
+    final service = serviceConnection.serviceManager.service!;
+    final isolateId =
+        serviceConnection
+            .serviceManager
+            .isolateManager
+            .selectedIsolate
+            .value!
+            .id!;
+
+    // If `object` is a library, it will always be a root node and is simple to
+    // find.
+    if (object is LibraryRef) {
+      final result = _searchRootObjectNodes(object)!;
+      await result.populateLocation();
+      return result;
+    }
+
+    // Otherwise, we need to find the target script to determine the library
+    // the target node is listed under.
+    final targetScript = switch (object) {
+      ClassRef(:final location?) ||
+      FieldRef(:final location?) ||
+      FuncRef(:final location?) => location.script,
+      Code(:final function?) when function is FuncRef =>
+        function.location?.script,
+      ScriptRef() => object,
+      _ => null,
+    };
+
+    if (targetScript == null) {
+      throw StateError('Could not find script');
+    }
+
+    final scriptObj =
+        await service.getObject(isolateId, targetScript.id!) as Script;
+    final targetLib = scriptObj.library!;
+
+    // Search targetLib only on the root level nodes (this is the most common
+    // scenario).
+    var libNode = _searchRootObjectNodes(targetLib);
+
+    // If we couldn't find the target library as a root node, it's possible we
+    // have a library defined using the `library` keyword by the user, which
+    // will likely be under a directory node.
+    libNode ??= breadthFirstSearchObject(scriptObj, rootObjectNodes.value);
+
+    // If the object's owning script URI is the same as the target library URI,
+    // return the library node as the match.
+    if (targetLib.uri == targetScript.uri) {
+      return libNode!;
+    }
+
+    // Find the script node nested under the library.
+    final scriptNode = breadthFirstSearchObject(
+      targetScript,
+      rootObjectNodes.value,
+    );
+    if (scriptNode == null) {
+      throw StateError('Could not find script node');
+    }
+    await scriptNode.populateLocation();
+    return scriptNode;
+  }
+
+  VMServiceObjectNode? _searchRootObjectNodes(ObjRef obj) {
+    for (final rootNode in rootObjectNodes.value) {
+      if (rootNode.object?.id == obj.id) {
+        return rootNode;
+      }
+    }
+    return null;
+  }
+
+  /// Performs a breath first search on the list of roots and returns the
+  /// first node whose object is the same as the target [obj].
+  VMServiceObjectNode? breadthFirstSearchObject(
+    ObjRef obj,
+    List<VMServiceObjectNode> roots,
+  ) {
+    for (final root in roots) {
+      final match = breadthFirstTraversal<VMServiceObjectNode>(
+        root,
+        returnCondition: (node) => node.object?.id == obj.id,
+      );
+      if (match != null) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  @override
+  void dispose() {
+    _outlineNodes.dispose();
+    _isLoadingOutline.dispose();
+    rootObjectNodesInternal.dispose();
+    _selectedNodeIndex.dispose();
+    _initialized.dispose();
+    _scriptSelection = null;
+    _outlineSelection = null;
+    super.dispose();
   }
 }

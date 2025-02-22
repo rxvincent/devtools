@@ -1,12 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
-
-import '../../primitives/utils.dart';
+import '../../shared/constants.dart';
+import '../../shared/primitives/utils.dart';
 import 'cpu_profile_model.dart';
 
 /// Process for composing [CpuProfileData] into a structured tree of
@@ -14,18 +13,6 @@ import 'cpu_profile_model.dart';
 class CpuProfileTransformer {
   /// Number of stack frames we will process in each batch.
   static const _defaultBatchSize = 100;
-
-  /// Notifies with the current progress value of transforming CPU profile data.
-  ///
-  /// This value should sit between 0.0 and 1.0.
-  ValueListenable<double> get progressNotifier => _progressNotifier;
-  final _progressNotifier = ValueNotifier<double>(0.0);
-
-  late int _stackFramesCount;
-
-  List<String?>? _stackFrameKeys;
-
-  List<CpuStackFrame>? _stackFrameValues;
 
   int _stackFramesProcessed = 0;
 
@@ -42,45 +29,79 @@ class CpuProfileTransformer {
     reset();
 
     _activeProcessId = processId;
-    _stackFramesCount = cpuProfileData.stackFrames.length;
-    _stackFrameKeys = cpuProfileData.stackFrames.keys.toList();
-    _stackFrameValues = cpuProfileData.stackFrames.values.toList();
+    final stackFramesCount = cpuProfileData.stackFrames.length;
+    final stackFrameValues = cpuProfileData.stackFrames.values.iterator;
 
     // At minimum, process the data in 4 batches to smooth the appearance of
     // the progress indicator.
-    final quarterBatchSize = (_stackFramesCount / 4).round();
-    final batchSize = math.min(
+    final quarterBatchSize = (stackFramesCount / 4).round();
+    var batchSize = math.min(
       _defaultBatchSize,
       quarterBatchSize == 0 ? 1 : quarterBatchSize,
     );
-
     // Use batch processing to maintain a responsive UI.
-    while (_stackFramesProcessed < _stackFramesCount) {
-      _processBatch(batchSize, cpuProfileData, processId: processId);
-      _progressNotifier.value = _stackFramesProcessed / _stackFramesCount;
+    while (_stackFramesProcessed < stackFramesCount) {
+      final watch = Stopwatch()..start();
+      _processBatch(
+        batchSize,
+        cpuProfileData,
+        processId: processId,
+        stackFrameValues: stackFrameValues,
+      );
+      watch.stop();
+      // Avoid divide by zero
+      final elapsedMs = math.max(watch.elapsedMilliseconds, 1);
+      // Adjust to use half the frame budget.
+      batchSize = math.max(
+        (batchSize * frameBudgetMs * 0.5 / elapsedMs).ceil(),
+        1,
+      );
 
       // Await a small delay to give the UI thread a chance to update the
       // progress indicator. Use a longer delay than the default (0) so that the
       // progress indicator will look smoother.
-      await delayForBatchProcessing(micros: 5000);
+      await delayToReleaseUiThread(micros: 5000);
 
       if (processId != _activeProcessId) {
         throw ProcessCancelledException();
       }
     }
 
+    if (cpuProfileData.rootedAtTags) {
+      // Check to see if there are any empty tag roots as a result of filtering
+      // and remove them.
+      final nodeIndicesToRemove = <int>[];
+      for (
+        int i = cpuProfileData.cpuProfileRoot.children.length - 1;
+        i >= 0;
+        --i
+      ) {
+        final root = cpuProfileData.cpuProfileRoot.children[i];
+        if (root.isTag && root.children.isEmpty) {
+          nodeIndicesToRemove.add(i);
+        }
+      }
+      // TODO(jakemac53): This is O(N^2), we should have a function to remove
+      // multiple children at once.
+      nodeIndicesToRemove.forEach(
+        cpuProfileData.cpuProfileRoot.removeChildAtIndex,
+      );
+    }
+
     _setExclusiveSampleCountsAndTags(cpuProfileData);
     cpuProfileData.processed = true;
 
-    // TODO(kenz): investigate why this assert is firing again.
-    // https://github.com/flutter/devtools/issues/1529.
-//    assert(
-//      cpuProfileData.profileMetaData.sampleCount ==
-//          cpuProfileData.cpuProfileRoot.inclusiveSampleCount,
-//      'SampleCount from response (${cpuProfileData.profileMetaData.sampleCount})'
-//      ' != sample count from root '
-//      '(${cpuProfileData.cpuProfileRoot.inclusiveSampleCount})',
-//    );
+    assert(
+      cpuProfileData.profileMetaData.sampleCount ==
+          cpuProfileData.cpuProfileRoot.inclusiveSampleCount,
+      'SampleCount from response (${cpuProfileData.profileMetaData.sampleCount})'
+      ' != sample count from root '
+      '(${cpuProfileData.cpuProfileRoot.inclusiveSampleCount})',
+    );
+
+    // We always show the bottom up roots first, so it is fine to eagerly
+    // compute.
+    await cpuProfileData.computeBottomUpRoots();
 
     // Reset the transformer after processing.
     reset();
@@ -90,17 +111,14 @@ class CpuProfileTransformer {
     int batchSize,
     CpuProfileData cpuProfileData, {
     required String processId,
+    required Iterator<CpuStackFrame> stackFrameValues,
   }) {
-    final batchEnd =
-        math.min(_stackFramesProcessed + batchSize, _stackFramesCount);
-    for (int i = _stackFramesProcessed; i < batchEnd; i++) {
+    for (int i = 0; i < batchSize && stackFrameValues.moveNext(); i++) {
       if (processId != _activeProcessId) {
         throw ProcessCancelledException();
       }
-      final key = _stackFrameKeys![i];
-      final value = _stackFrameValues![i];
-      final stackFrame = cpuProfileData.stackFrames[key]!;
-      final parent = cpuProfileData.stackFrames[value.parentId];
+      final stackFrame = stackFrameValues.current;
+      final parent = cpuProfileData.stackFrames[stackFrame.parentId];
       _processStackFrame(stackFrame, parent, cpuProfileData);
       _stackFramesProcessed++;
     }
@@ -111,9 +129,9 @@ class CpuProfileTransformer {
     CpuStackFrame? parent,
     CpuProfileData cpuProfileData,
   ) {
+    // [stackFrame] is the root of a new cpu sample. Add it as a child of
+    // [cpuProfileRoot].
     if (parent == null) {
-      // [stackFrame] is the root of a new cpu sample. Add it as a child of
-      // [cpuProfile].
       cpuProfileData.cpuProfileRoot.addChild(stackFrame);
     } else {
       parent.addChild(stackFrame);
@@ -121,7 +139,7 @@ class CpuProfileTransformer {
   }
 
   void _setExclusiveSampleCountsAndTags(CpuProfileData cpuProfileData) {
-    for (CpuSample sample in cpuProfileData.cpuSamples) {
+    for (final sample in cpuProfileData.cpuSamples) {
       final leafId = sample.leafId;
       final stackFrame = cpuProfileData.stackFrames[leafId];
       assert(
@@ -131,12 +149,8 @@ class CpuProfileTransformer {
         'you must export the timeline immediately after the AssertionError is '
         'thrown.',
       );
-      if (stackFrame != null) {
+      if (stackFrame != null && !stackFrame.isTag) {
         stackFrame.exclusiveSampleCount++;
-        final userTag = sample.userTag;
-        if (userTag != null) {
-          stackFrame.incrementTagSampleCount(userTag);
-        }
       }
     }
   }
@@ -144,13 +158,6 @@ class CpuProfileTransformer {
   void reset() {
     _activeProcessId = null;
     _stackFramesProcessed = 0;
-    _stackFrameKeys = null;
-    _stackFrameValues = null;
-    _progressNotifier.value = 0.0;
-  }
-
-  void dispose() {
-    _progressNotifier.dispose();
   }
 }
 
@@ -164,33 +171,54 @@ class CpuProfileTransformer {
 ///
 /// At the time this method is called, we assume we have a list of roots with
 /// accurate inclusive/exclusive sample counts.
-void mergeCpuProfileRoots(List<CpuStackFrame> roots) {
-  // Loop through a copy of [roots] so that we can remove nodes from [roots]
-  // once we have merged them.
-  final List<CpuStackFrame> rootsCopy = List.from(roots);
-  for (CpuStackFrame root in rootsCopy) {
-    if (!roots.contains(root)) {
-      // We have already merged [root] and removed it from [roots]. Do not
-      // attempt to merge again.
+Future<void> mergeCpuProfileRoots(
+  List<CpuStackFrame> roots, {
+  Stopwatch? stopwatch,
+}) async {
+  stopwatch ??= Stopwatch()..start();
+  if (stopwatch.elapsedMilliseconds > frameBudgetMs * 0.5) {
+    await delayToReleaseUiThread(micros: 5000);
+    stopwatch.reset();
+  }
+  final mergedRoots = <CpuStackFrame>[];
+  final rootIndicesToRemove = <int>{};
+
+  // The index from which we will traverse to find root matches.
+  var traverseIndex = 0;
+
+  for (int i = 0; i < roots.length; i++) {
+    if (rootIndicesToRemove.contains(i)) {
+      // We have already merged [root]. Do not attempt to merge again.
       continue;
     }
 
-    final matchingRoots =
-        roots.where((other) => other.matches(root) && other != root).toList();
-    if (matchingRoots.isEmpty) {
-      continue;
-    }
+    final root = roots[i];
 
-    for (CpuStackFrame match in matchingRoots) {
-      match.children.forEach(root.addChild);
-      root.exclusiveSampleCount += match.exclusiveSampleCount;
-      root.inclusiveSampleCount += match.inclusiveSampleCount;
-      roots.remove(match);
-      mergeCpuProfileRoots(root.children);
+    // Begin traversing from the index after [i] since we have already seen
+    // every node at index <= [i].
+    traverseIndex = i + 1;
+
+    for (int j = traverseIndex; j < roots.length; j++) {
+      final otherRoot = roots[j];
+      final isMatch =
+          !rootIndicesToRemove.contains(j) && otherRoot.matches(root);
+      if (isMatch) {
+        otherRoot.children.forEach(root.addChild);
+        root.exclusiveSampleCount += otherRoot.exclusiveSampleCount;
+        root.inclusiveSampleCount += otherRoot.inclusiveSampleCount;
+        rootIndicesToRemove.add(j);
+        await mergeCpuProfileRoots(root.children, stopwatch: stopwatch);
+      }
     }
+    mergedRoots.add(root);
   }
 
-  for (CpuStackFrame root in roots) {
-    root.index = roots.indexOf(root);
+  // Clearing and adding all the elements in [mergedRoots] is more performant
+  // than removing each root that was merged individually.
+  roots
+    ..clear()
+    ..addAll(mergedRoots);
+  for (int i = 0; i < roots.length; i++) {
+    roots[i].index = i;
   }
 }

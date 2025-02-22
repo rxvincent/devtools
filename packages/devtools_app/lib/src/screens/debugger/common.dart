@@ -1,31 +1,24 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/material.dart';
-
-import '../../shared/common_widgets.dart';
-import '../../shared/theme.dart';
 
 /// Create a header area for a debugger component.
 ///
 /// Either one of [text] or [child] must be supplied.
-Container debuggerSectionTitle(ThemeData theme, {String? text, Widget? child}) {
+Widget debuggerSectionTitle(ThemeData theme, {String? text, Widget? child}) {
   assert(text != null || child != null);
   assert(text == null || child == null);
 
-  return Container(
-    decoration: BoxDecoration(
-      border: Border(
-        bottom: BorderSide(color: theme.focusColor),
-      ),
-      color: theme.titleSolidBackgroundColor,
+  return OutlineDecoration.onlyBottom(
+    child: Container(
+      padding: const EdgeInsets.only(left: defaultSpacing),
+      alignment: Alignment.centerLeft,
+      height: defaultHeaderHeight,
+      child: child ?? Text(text!, style: theme.textTheme.titleMedium),
     ),
-    padding: const EdgeInsets.only(left: defaultSpacing),
-    alignment: Alignment.centerLeft,
-    height: areaPaneHeaderHeight,
-    child:
-        child != null ? child : Text(text!, style: theme.textTheme.subtitle2),
   );
 }
 

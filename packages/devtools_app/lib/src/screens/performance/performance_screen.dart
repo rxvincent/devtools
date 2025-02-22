@@ -1,371 +1,218 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
 import 'dart:async';
 
+import 'package:devtools_app_shared/ui.dart';
+import 'package:devtools_app_shared/utils.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:provider/provider.dart';
 
-import '../../analytics/analytics.dart' as ga;
-import '../../analytics/analytics_common.dart';
-import '../../analytics/constants.dart' as analytics_constants;
-import '../../config_specific/import_export/import_export.dart';
-import '../../primitives/auto_dispose_mixin.dart';
-import '../../service/service_extension_widgets.dart';
-import '../../service/service_extensions.dart' as extensions;
-import '../../shared/banner_messages.dart';
-import '../../shared/common_widgets.dart';
+import '../../shared/analytics/analytics.dart' as ga;
+import '../../shared/analytics/constants.dart' as gac;
+import '../../shared/config_specific/import_export/import_export.dart';
+import '../../shared/framework/screen.dart';
 import '../../shared/globals.dart';
-import '../../shared/screen.dart';
-import '../../shared/split.dart';
-import '../../shared/theme.dart';
-import '../../shared/utils.dart';
-import '../../shared/version.dart';
-import '../../ui/icons.dart';
-import '../../ui/vm_flag_widgets.dart';
-import 'event_details.dart';
-import 'flutter_frames_chart.dart';
-import 'panes/controls/enhance_tracing/enhance_tracing.dart';
-import 'panes/controls/layer_debugging_options.dart';
-import 'panes/controls/performance_settings.dart';
+import '../../shared/managers/banner_messages.dart';
+import '../../shared/ui/common_widgets.dart';
+import '../../shared/ui/file_import.dart';
+import '../../shared/utils/utils.dart';
+import 'panes/controls/performance_controls.dart';
+import 'panes/flutter_frames/flutter_frames_chart.dart';
 import 'performance_controller.dart';
-import 'performance_model.dart';
 import 'tabbed_performance_view.dart';
 
 // TODO(kenz): handle small screen widths better by using Wrap instead of Row
 // where applicable.
 
 class PerformanceScreen extends Screen {
-  const PerformanceScreen()
-      : super.conditional(
-          id: id,
-          requiresDartVm: true,
-          worksOffline: true,
-          title: 'Performance',
-          icon: Octicons.pulse,
-        );
+  PerformanceScreen() : super.fromMetaData(ScreenMetaData.performance);
 
-  static const id = 'performance';
+  static final id = ScreenMetaData.performance.id;
 
   @override
   String get docPageId => id;
 
   @override
-  Widget build(BuildContext context) => const PerformanceScreenBody();
+  Widget buildScreenBody(BuildContext context) {
+    if (serviceConnection.serviceManager.connectedApp?.isDartWebAppNow ??
+        false) {
+      return const WebPerformanceScreenBody();
+    }
+    return const PerformanceScreenBody();
+  }
+
+  @override
+  Widget buildDisconnectedScreenBody(BuildContext context) {
+    return const DisconnectedPerformanceScreenBody();
+  }
 }
 
 class PerformanceScreenBody extends StatefulWidget {
-  const PerformanceScreenBody();
+  const PerformanceScreenBody({super.key});
 
   @override
   PerformanceScreenBodyState createState() => PerformanceScreenBodyState();
 }
 
 class PerformanceScreenBodyState extends State<PerformanceScreenBody>
-    with
-        AutoDisposeMixin,
-        OfflineScreenMixin<PerformanceScreenBody, OfflinePerformanceData>,
-        ProvidedControllerMixin<PerformanceController, PerformanceScreenBody> {
-  bool processing = false;
-
-  double processingProgress = 0.0;
+    with AutoDisposeMixin {
+  late PerformanceController controller;
 
   @override
   void initState() {
     super.initState();
     ga.screen(PerformanceScreen.id);
-    addAutoDisposeListener(offlineController.offlineMode);
+    controller = screenControllers.lookup<PerformanceController>();
+    addAutoDisposeListener(offlineDataController.showingOfflineData);
+    addAutoDisposeListener(controller.loadingOfflineData);
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    maybePushUnsupportedFlutterVersionWarning(
-      context,
-      PerformanceScreen.id,
-      supportedFlutterVersion: SemanticVersion(
-        major: 2,
-        minor: 3,
-        // Specifying patch makes the version number more readable.
-        // ignore: avoid_redundant_argument_values
-        patch: 0,
-        preReleaseMajor: 16,
-        preReleaseMinor: 0,
-      ),
-    );
     maybePushDebugModePerformanceMessage(context, PerformanceScreen.id);
-
-    if (!initController()) return;
-
-    cancelListeners();
-
-    processing = controller.processing.value;
-    addAutoDisposeListener(controller.processing, () {
-      setState(() {
-        processing = controller.processing.value;
-      });
-    });
-
-    processingProgress = controller.processor.progressNotifier.value;
-    addAutoDisposeListener(controller.processor.progressNotifier, () {
-      setState(() {
-        processingProgress = controller.processor.progressNotifier.value;
-      });
-    });
-
-    addAutoDisposeListener(controller.selectedFrame);
-
-    // Load offline timeline data if available.
-    if (shouldLoadOfflineData()) {
-      // This is a workaround to guarantee that DevTools exports are compatible
-      // with other trace viewers (catapult, perfetto, chrome://tracing), which
-      // require a top level field named "traceEvents". See how timeline data is
-      // encoded in [ExportController.encode].
-      final timelineJson = Map<String, dynamic>.from(
-        offlineController.offlineDataJson[PerformanceScreen.id],
-      )..addAll({
-          PerformanceData.traceEventsKey:
-              offlineController.offlineDataJson[PerformanceData.traceEventsKey]
-        });
-      final offlinePerformanceData = OfflinePerformanceData.parse(timelineJson);
-      if (!offlinePerformanceData.isEmpty) {
-        loadOfflineData(offlinePerformanceData);
-      }
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final isOfflineFlutterApp = offlineController.offlineMode.value &&
-        controller.offlinePerformanceData != null &&
-        controller.offlinePerformanceData!.frames.isNotEmpty;
-
-    final performanceScreen = Column(
-      children: [
-        if (!offlineController.offlineMode.value) _buildPerformanceControls(),
-        const SizedBox(height: denseRowSpacing),
-        if (isOfflineFlutterApp ||
-            (!offlineController.offlineMode.value &&
-                serviceManager.connectedApp!.isFlutterAppNow!))
-          DualValueListenableBuilder<List<FlutterFrame>, double>(
-            firstListenable: controller.flutterFrames,
-            secondListenable: controller.displayRefreshRate,
-            builder: (context, frames, displayRefreshRate, child) {
-              return FlutterFramesChart(
-                frames,
-                displayRefreshRate,
-              );
-            },
-          ),
-        Expanded(
-          child: Split(
-            axis: Axis.vertical,
-            initialFractions: const [0.7, 0.3],
-            children: [
-              TabbedPerformanceView(
-                controller: controller,
-                processing: processing,
-                processingProgress: processingProgress,
-              ),
-              ValueListenableBuilder<TimelineEvent?>(
-                valueListenable: controller.selectedTimelineEvent,
-                builder: (context, selectedEvent, _) {
-                  return EventDetails(selectedEvent);
-                },
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-
-    // We put these two items in a stack because the screen's UI needs to be
-    // built before offline data is processed in order to initialize listeners
-    // that respond to data processing events. The spinner hides the screen's
-    // empty UI while data is being processed.
-    return Stack(
-      children: [
-        performanceScreen,
-        if (loadingOfflineData)
-          Container(
+    return FutureBuilder(
+      future: controller.initialized,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done ||
+            controller.loadingOfflineData.value) {
+          return Container(
             color: Theme.of(context).scaffoldBackgroundColor,
             child: const CenteredCircularProgressIndicator(),
-          ),
-      ],
-    );
-  }
+          );
+        }
 
-  Widget _buildPerformanceControls() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        _PrimaryControls(
-          controller: controller,
-          processing: processing,
-          onClear: () => setState(() {}),
-        ),
-        const SizedBox(width: defaultSpacing),
-        SecondaryPerformanceControls(controller: controller),
-      ],
-    );
-  }
-
-  @override
-  FutureOr<void> processOfflineData(OfflinePerformanceData offlineData) async {
-    await controller.processOfflineData(offlineData);
-  }
-
-  @override
-  bool shouldLoadOfflineData() {
-    return offlineController.shouldLoadOfflineData(PerformanceScreen.id) &&
-        offlineController.offlineDataJson[PerformanceData.traceEventsKey] !=
-            null;
-  }
-}
-
-class _PrimaryControls extends StatelessWidget {
-  const _PrimaryControls({
-    Key? key,
-    required this.controller,
-    required this.processing,
-    this.onClear,
-  }) : super(key: key);
-
-  final PerformanceController controller;
-
-  final bool processing;
-
-  final VoidCallback? onClear;
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: controller.recordingFrames,
-      builder: (context, recording, child) {
-        return Row(
+        final showingOfflineData =
+            offlineDataController.showingOfflineData.value;
+        final isOfflineFlutterApp =
+            showingOfflineData &&
+            controller.offlinePerformanceData != null &&
+            controller.offlinePerformanceData!.frames.isNotEmpty;
+        return Column(
           children: [
-            OutlinedIconButton(
-              icon: Icons.pause,
-              tooltip: 'Pause frame recording',
-              onPressed: recording ? _pauseFrameRecording : null,
+            PerformanceControls(
+              controller: controller,
+              onClear: () => setState(() {}),
             ),
-            const SizedBox(width: denseSpacing),
-            OutlinedIconButton(
-              icon: Icons.play_arrow,
-              tooltip: 'Resume frame recording',
-              onPressed: recording ? null : _resumeFrameRecording,
-            ),
-            const SizedBox(width: denseSpacing),
-            child!,
+            const SizedBox(height: intermediateSpacing),
+            if (isOfflineFlutterApp ||
+                (!showingOfflineData &&
+                    serviceConnection
+                        .serviceManager
+                        .connectedApp!
+                        .isFlutterAppNow!))
+              FlutterFramesChart(
+                controller.flutterFramesController,
+                showingOfflineData: showingOfflineData,
+                impellerEnabled: controller.impellerEnabled,
+              ),
+            const Expanded(child: TabbedPerformanceView()),
           ],
         );
       },
-      child: OutlinedIconButton(
-        icon: Icons.block,
-        tooltip: 'Clear',
-        onPressed: processing ? null : _clearPerformanceData,
-      ),
     );
-  }
-
-  void _pauseFrameRecording() {
-    ga.select(analytics_constants.performance, analytics_constants.pause);
-    controller.toggleRecordingFrames(false);
-  }
-
-  void _resumeFrameRecording() {
-    ga.select(analytics_constants.performance, analytics_constants.resume);
-    controller.toggleRecordingFrames(true);
-  }
-
-  Future<void> _clearPerformanceData() async {
-    ga.select(analytics_constants.performance, analytics_constants.clear);
-    await controller.clearData();
-    if (onClear != null) {
-      onClear!();
-    }
   }
 }
 
-class SecondaryPerformanceControls extends StatelessWidget {
-  const SecondaryPerformanceControls({
-    Key? key,
-    required this.controller,
-  }) : super(key: key);
-
-  static const minScreenWidthForTextBeforeScaling = 1075.0;
-
-  final PerformanceController controller;
+class WebPerformanceScreenBody extends StatelessWidget {
+  const WebPerformanceScreenBody({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
-      children: [
-        if (serviceManager.connectedApp!.isFlutterAppNow!) ...[
-          ServiceExtensionButtonGroup(
-            minScreenWidthForTextBeforeScaling:
-                minScreenWidthForTextBeforeScaling,
-            extensions: [
-              extensions.performanceOverlay,
-              // TODO(devoncarew): Enable this once we have a UI displaying the
-              // values.
-              //trackRebuildWidgets,
-            ],
-          ),
-          const SizedBox(width: denseSpacing),
-          EnhanceTracingButton(controller.enhanceTracingController),
-          const SizedBox(width: denseSpacing),
-          const MoreDebuggingOptionsButton(),
-        ],
-        const SizedBox(width: denseSpacing),
-        ProfileGranularityDropdown(
-          screenId: PerformanceScreen.id,
-          profileGranularityFlagNotifier:
-              controller.cpuProfilerController.profileGranularityFlagNotifier!,
-        ),
-        const SizedBox(width: defaultSpacing),
-        OutlinedIconButton(
-          icon: Icons.file_download,
-          tooltip: 'Export data',
-          onPressed: () => _exportPerformanceData(context),
-        ),
-        const SizedBox(width: denseSpacing),
-        SettingsOutlinedButton(
-          onPressed: () => _openSettingsDialog(context),
-        ),
-      ],
-    );
-  }
-
-  void _exportPerformanceData(BuildContext context) {
-    ga.select(analytics_constants.performance, analytics_constants.export);
-    final exportedFile = controller.exportData();
-    // TODO(kenz): investigate if we need to do any error handling here. Is the
-    // download always successful?
-    // TODO(peterdjlee): find a way to push the notification logic into the
-    // export controller.
-    notificationService.push(successfulExportMessage(exportedFile));
-  }
-
-  void _openSettingsDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => PerformanceSettingsDialog(controller),
+    final isFlutterWebApp =
+        serviceConnection.serviceManager.connectedApp?.isFlutterWebAppNow ??
+        false;
+    return Markdown(
+      data: isFlutterWebApp ? flutterWebInstructionsMd : dartWebInstructionsMd,
+      onTapLink: (_, url, _) {
+        if (url != null) {
+          unawaited(launchUrlWithErrorHandling(url));
+        }
+      },
     );
   }
 }
 
-class PerformanceScreenMetrics extends ScreenAnalyticsMetrics {
-  PerformanceScreenMetrics({
-    this.uiDuration,
-    this.rasterDuration,
-    this.shaderCompilationDuration,
-    this.traceEventCount,
-  });
+class DisconnectedPerformanceScreenBody extends StatelessWidget {
+  const DisconnectedPerformanceScreenBody({super.key});
 
-  final Duration? uiDuration;
-  final Duration? rasterDuration;
-  final Duration? shaderCompilationDuration;
-  final int? traceEventCount;
+  static const importInstructions =
+      'Open a performance data file that was previously saved from DevTools.';
+
+  @override
+  Widget build(BuildContext context) {
+    return FileImportContainer(
+      instructions: importInstructions,
+      actionText: 'Load data',
+      gaScreen: gac.performance,
+      gaSelectionImport: gac.PerformanceEvents.openDataFile.name,
+      gaSelectionAction: gac.PerformanceEvents.loadDataFromFile.name,
+      onAction: (jsonFile) {
+        Provider.of<ImportController>(
+          context,
+          listen: false,
+        ).importData(jsonFile, expectedScreenId: PerformanceScreen.id);
+      },
+    );
+  }
 }
+
+const timelineLink =
+    'https://api.flutter.dev/flutter/dart-developer/Timeline-class.html';
+const timelineTaskLink =
+    'https://api.flutter.dev/flutter/dart-developer/TimelineTask-class.html';
+const debugBuildsLink =
+    'https://api.flutter.dev/flutter/widgets/debugProfileBuildsEnabled.html';
+const debugUserBuildsLink =
+    'https://api.flutter.dev/flutter/widgets/debugProfileBuildsEnabledUserWidgets.html';
+const debugLayoutsLink =
+    'https://api.flutter.dev/flutter/rendering/debugProfileLayoutsEnabled.html';
+const debugPaintsLink =
+    'https://api.flutter.dev/flutter/rendering/debugProfilePaintsEnabled.html';
+const profileModeLink = 'https://flutter.dev/to/profile-mode';
+const performancePanelLink =
+    'https://developer.chrome.com/docs/devtools/performance';
+
+const flutterWebInstructionsMd = '''
+## How to use Chrome DevTools for performance profiling
+
+The Flutter framework emits timeline events as it works to build frames, draw
+scenes, and track other activity such as garbage collections. These events are
+exposed in the Chrome DevTools performance panel for debugging.
+
+You can also emit your own timeline events using the `dart:developer`
+[Timeline]($timelineLink) and [TimelineTask]($timelineTaskLink) APIs for further
+performance analysis.
+
+### Optional flags to enhance tracing
+
+- [debugProfileBuildsEnabled]($debugBuildsLink): Adds Timeline events for every Widget built.
+- [debugProfileBuildsEnabledUserWidgets]($debugUserBuildsLink): Adds Timeline events for every user-created Widget built.
+- [debugProfileLayoutsEnabled]($debugLayoutsLink): Adds Timeline events for every RenderObject layout.
+- [debugProfilePaintsEnabled]($debugPaintsLink): Adds Timeline events for every RenderObject painted.
+
+### Instructions
+
+1. *[Optional]* Set any desired tracing flags to true from your app's main method.
+2. Run your Flutter web app in [profile mode]($profileModeLink).
+3. Open up the [Chrome DevTools' Performance panel]($performancePanelLink) for
+your application, and start recording to capture timeline events.
+''';
+
+const dartWebInstructionsMd = '''
+## How to use Chrome DevTools for performance profiling
+
+Any events emitted using the `dart:developer` [Timeline]($timelineLink) and
+[TimelineTask]($timelineTaskLink) APIs are exposed in the Chrome DevTools
+performance panel.
+
+Open up the [Chrome DevTools' Performance panel]($performancePanelLink) for
+your application, and start recording to capture timeline events.
+''';

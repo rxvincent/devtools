@@ -1,6 +1,8 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
+
+// ignore_for_file: avoid_print
 
 import 'dart:async';
 import 'dart:convert';
@@ -11,6 +13,10 @@ import 'package:vm_service/utils.dart';
 import 'package:vm_service/vm_service.dart';
 import 'package:vm_service/vm_service_io.dart';
 
+// TODO(kenz): eventually delete this class in favor of
+// integration_test/test_infra/test_app_driver.dart once the tests that
+// depend on this class are moved over to be true integration tests.
+
 /// This class was copied from
 /// flutter/packages/flutter_tools/test/integration/test_driver.dart. Its
 /// supporting classes were also copied from flutter/packages/flutter_tools.
@@ -18,26 +24,23 @@ import 'package:vm_service/vm_service_io.dart';
 /// (flutter_tools/).
 
 // Set this to true for debugging to get JSON written to stdout.
-const bool _printDebugOutputToStdOut = false;
-const Duration defaultTimeout = Duration(seconds: 40);
-const Duration appStartTimeout = Duration(seconds: 120);
-const Duration quitTimeout = Duration(seconds: 10);
+const _printDebugOutputToStdOut = false;
+const defaultTimeout = Duration(seconds: 40);
+const appStartTimeout = Duration(seconds: 240);
+const quitTimeout = Duration(seconds: 10);
 
 abstract class FlutterTestDriver {
   FlutterTestDriver(this.projectFolder, {String? logPrefix})
-      : _logPrefix = logPrefix != null ? '$logPrefix: ' : '';
+    : _logPrefix = logPrefix != null ? '$logPrefix: ' : '';
 
   final Directory projectFolder;
   final String _logPrefix;
   late Process proc;
   late int procPid;
-  final StreamController<String> stdoutController =
-      StreamController<String>.broadcast();
-  final StreamController<String> stderrController =
-      StreamController<String>.broadcast();
-  final StreamController<String> _allMessages =
-      StreamController<String>.broadcast();
-  final StringBuffer errorBuffer = StringBuffer();
+  final stdoutController = StreamController<String>.broadcast();
+  final stderrController = StreamController<String>.broadcast();
+  final _allMessages = StreamController<String>.broadcast();
+  final errorBuffer = StringBuffer();
   late String lastResponse;
   late Uri _vmServiceWsUri;
   bool hasExited = false;
@@ -52,9 +55,9 @@ abstract class FlutterTestDriver {
   Uri get vmServiceUri => _vmServiceWsUri;
 
   String _debugPrint(String msg) {
-    const int maxLength = 500;
-    final String truncatedMsg =
-        msg.length > maxLength ? msg.substring(0, maxLength) + '...' : msg;
+    const maxLength = 500;
+    final truncatedMsg =
+        msg.length > maxLength ? '${msg.substring(0, maxLength)}...' : msg;
     _allMessages.add(truncatedMsg);
     if (_printDebugOutputToStdOut) {
       print('$_logPrefix$truncatedMsg');
@@ -68,17 +71,17 @@ abstract class FlutterTestDriver {
     FlutterRunConfiguration runConfig = const FlutterRunConfiguration(),
     File? pidFile,
   }) async {
-    final _args = [
+    final testArgs = [
       ...args,
       if (runConfig.withDebugger) '--start-paused',
       if (pidFile != null) ...['--pid-file', pidFile.path],
     ];
 
-    _debugPrint('Spawning flutter $_args in ${projectFolder.path}');
+    _debugPrint('Spawning flutter $testArgs in ${projectFolder.path}');
 
     proc = await Process.start(
       flutterExecutable,
-      _args,
+      testArgs,
       workingDirectory: projectFolder.path,
       environment: <String, String>{
         'FLUTTER_TEST': 'true',
@@ -93,10 +96,12 @@ abstract class FlutterTestDriver {
         hasExited = true;
       }),
     );
-    transformToLines(proc.stdout)
-        .listen((String line) => stdoutController.add(line));
-    transformToLines(proc.stderr)
-        .listen((String line) => stderrController.add(line));
+    transformToLines(
+      proc.stdout,
+    ).listen((String line) => stdoutController.add(line));
+    transformToLines(
+      proc.stderr,
+    ).listen((String line) => stderrController.add(line));
 
     // Capture stderr to a buffer so we can show it all if any requests fail.
     stderrController.stream.listen(errorBuffer.writeln);
@@ -106,7 +111,7 @@ abstract class FlutterTestDriver {
     stderrController.stream.listen(_debugPrint);
   }
 
-  Future<int> killGracefully() async {
+  Future<int> killGracefully() {
     _debugPrint('Sending SIGTERM to $procPid..');
     Process.killPid(procPid);
     return proc.exitCode.timeout(quitTimeout, onTimeout: _killForcefully);
@@ -124,7 +129,7 @@ abstract class FlutterTestDriver {
     // Currently these tests only have a single isolate. If this
     // ceases to be the case, this code will need changing.
     if (flutterIsolateId == null) {
-      final VM vm = await vmService!.getVM();
+      final vm = await vmService!.getVM();
       flutterIsolateId = vm.isolates!.first.id!;
     }
     return flutterIsolateId!;
@@ -136,13 +141,13 @@ abstract class FlutterTestDriver {
 
   Future<Isolate> waitForPause() async {
     _debugPrint('Waiting for isolate to pause');
-    final String flutterIsolate = await getFlutterIsolateId();
+    final flutterIsolate = await getFlutterIsolateId();
 
     Future<Isolate> waitForPause() async {
-      final Completer<Event> pauseEvent = Completer<Event>();
+      final pauseEvent = Completer<Event>();
 
       // Start listening for pause events.
-      final StreamSubscription<Event> pauseSub = vmService!.onDebugEvent
+      final pauseSub = vmService!.onDebugEvent
           .where(
             (Event event) =>
                 event.isolate!.id == flutterIsolate &&
@@ -153,7 +158,7 @@ abstract class FlutterTestDriver {
       // But also check if the isolate was already paused (only after we've set
       // up the sub) to avoid races. If it was paused, we don't need to wait
       // for the event.
-      final Isolate isolate = await vmService!.getIsolate(flutterIsolate);
+      final isolate = await vmService!.getIsolate(flutterIsolate);
       if (!isolate.pauseEvent!.kind!.startsWith('Pause')) {
         await pauseEvent.future;
       }
@@ -172,7 +177,7 @@ abstract class FlutterTestDriver {
 
   Future<Isolate?> resume({String? step, bool wait = true}) async {
     _debugPrint('Sending resume ($step)');
-    await _timeoutWithMessages<dynamic>(
+    await _timeoutWithMessages<Object?>(
       () async => vmService!.resume(await getFlutterIsolateId(), step: step),
       message: 'Isolate did not respond to resume ($step)',
     );
@@ -184,12 +189,11 @@ abstract class FlutterTestDriver {
     int? id,
     Duration? timeout,
     bool ignoreAppStopEvent = false,
-  }) async {
-    final Completer<Map<String, dynamic>> response =
-        Completer<Map<String, dynamic>>();
+  }) {
+    final response = Completer<Map<String, dynamic>>();
     late StreamSubscription<String> sub;
     sub = stdoutController.stream.listen((String line) async {
-      final dynamic json = _parseFlutterResponse(line);
+      final json = _parseFlutterResponse(line);
       if (json == null) {
         return;
       } else if ((event != null && json['event'] == event) ||
@@ -198,16 +202,19 @@ abstract class FlutterTestDriver {
         response.complete(json);
       } else if (!ignoreAppStopEvent && json['event'] == 'app.stop') {
         await sub.cancel();
-        final StringBuffer error = StringBuffer();
+        final error = StringBuffer();
         error.write('Received app.stop event while waiting for ');
         error.write(
           '${event != null ? '$event event' : 'response to request $id.'}.\n\n',
         );
-        if (json['params'] != null && json['params']['error'] != null) {
-          error.write('${json['params']['error']}\n\n');
-        }
-        if (json['params'] != null && json['params']['trace'] != null) {
-          error.write('${json['params']['trace']}\n\n');
+        final params = json['params'];
+        if (params != null && params is Map<String, Object?>) {
+          if (params['error'] != null) {
+            error.write('${params['error']}\n\n');
+          }
+          if (params['trace'] != null) {
+            error.write('${params['trace']}\n\n');
+          }
         }
         response.completeError(error.toString());
       }
@@ -216,9 +223,10 @@ abstract class FlutterTestDriver {
     return _timeoutWithMessages<Map<String, dynamic>>(
       () => response.future,
       timeout: timeout,
-      message: event != null
-          ? 'Did not receive expected $event event.'
-          : 'Did not receive response to request "$id".',
+      message:
+          event != null
+              ? 'Did not receive expected $event event.'
+              : 'Did not receive response to request "$id".',
     ).whenComplete(() => sub.cancel());
   }
 
@@ -229,31 +237,33 @@ abstract class FlutterTestDriver {
   }) {
     // Capture output to a buffer so if we don't get the response we want we can show
     // the output that did arrive in the timeout error.
-    final StringBuffer messages = StringBuffer();
-    final DateTime start = DateTime.now();
+    final messages = StringBuffer();
+    final start = DateTime.now();
     void logMessage(String m) {
-      final int ms = DateTime.now().difference(start).inMilliseconds;
+      final ms = DateTime.now().difference(start).inMilliseconds;
       messages.writeln('[+ ${ms.toString().padLeft(5)}] $m');
     }
 
-    final StreamSubscription<String> sub =
-        _allMessages.stream.listen(logMessage);
+    final sub = _allMessages.stream.listen(logMessage);
 
-    return f().timeout(
-      timeout ?? defaultTimeout,
-      onTimeout: () {
-        logMessage('<timed out>');
-        throw '$message';
-      },
-    ).catchError((dynamic error) {
-      throw '$error\nReceived:\n${messages.toString()}';
-    }).whenComplete(() => sub.cancel());
+    return f()
+        .timeout(
+          timeout ?? defaultTimeout,
+          onTimeout: () {
+            logMessage('<timed out>');
+            throw '$message';
+          },
+        )
+        .catchError((Object? error) {
+          throw '$error\nReceived:\n${messages.toString()}';
+        })
+        .whenComplete(() => sub.cancel());
   }
 
-  Map<String, dynamic>? _parseFlutterResponse(String line) {
+  Map<String, Object?>? _parseFlutterResponse(String line) {
     if (line.startsWith('[') && line.endsWith(']')) {
       try {
-        final Map<String, dynamic>? resp = json.decode(line)[0];
+        final Map<String, dynamic>? resp = (json.decode(line) as List)[0];
         lastResponse = line;
         return resp;
       } catch (e) {
@@ -266,8 +276,7 @@ abstract class FlutterTestDriver {
 }
 
 class FlutterRunTestDriver extends FlutterTestDriver {
-  FlutterRunTestDriver(Directory projectFolder, {String? logPrefix})
-      : super(projectFolder, logPrefix: logPrefix);
+  FlutterRunTestDriver(super.projectFolder, {super.logPrefix});
 
   String? _currentRunningAppId;
 
@@ -276,10 +285,7 @@ class FlutterRunTestDriver extends FlutterTestDriver {
     FlutterRunConfiguration runConfig = const FlutterRunConfiguration(),
     File? pidFile,
   }) async {
-    final args = <String>[
-      'run',
-      '--machine',
-    ];
+    final args = <String>['run', '--machine'];
     if (runConfig.trackWidgetCreation) {
       args.add('--track-widget-creation');
     }
@@ -289,27 +295,6 @@ class FlutterRunTestDriver extends FlutterTestDriver {
     args.addAll(['-d', 'flutter-tester']);
     await setupProcess(
       args,
-      flutterExecutable: flutterExecutable,
-      runConfig: runConfig,
-      pidFile: pidFile,
-    );
-  }
-
-  Future<void> attach(
-    int port, {
-    required String flutterExecutable,
-    FlutterRunConfiguration runConfig = const FlutterRunConfiguration(),
-    File? pidFile,
-  }) async {
-    await setupProcess(
-      <String>[
-        'attach',
-        '--machine',
-        '-d',
-        'flutter-tester',
-        '--debug-port',
-        '$port',
-      ],
       flutterExecutable: flutterExecutable,
       runConfig: runConfig,
       pidFile: pidFile,
@@ -333,38 +318,58 @@ class FlutterRunTestDriver extends FlutterTestDriver {
     // Stash the PID so that we can terminate the VM more reliably than using
     // proc.kill() (because proc is a shell, because `flutter` is a shell
     // script).
-    final Map<String, dynamic> connected =
-        await waitFor(event: 'daemon.connected');
-    procPid = connected['params']['pid'];
+    final connected = await waitFor(event: 'daemon.connected');
+    final Map<String, dynamic> params = connected['params'];
+    procPid = params['pid'];
 
     // Set this up now, but we don't wait it yet. We want to make sure we don't
     // miss it while waiting for debugPort below.
-    final Future<Map<String, dynamic>> started =
-        waitFor(event: 'app.started', timeout: appStartTimeout);
+    final started = waitFor(event: 'app.started', timeout: appStartTimeout);
 
     if (runConfig.withDebugger) {
-      final Map<String, dynamic> debugPort =
-          await waitFor(event: 'app.debugPort', timeout: appStartTimeout);
-      final String wsUriString = debugPort['params']['wsUri'];
+      final debugPort = await waitFor(
+        event: 'app.debugPort',
+        timeout: appStartTimeout,
+      );
+      final Map<String, dynamic> params = debugPort['params'];
+      final String wsUriString = params['wsUri'];
       _vmServiceWsUri = Uri.parse(wsUriString);
 
       // Map to WS URI.
-      _vmServiceWsUri =
-          convertToWebSocketUrl(serviceProtocolUrl: _vmServiceWsUri);
+      _vmServiceWsUri = convertToWebSocketUrl(
+        serviceProtocolUrl: _vmServiceWsUri,
+      );
 
-      vmService = VmServiceWrapper(
-        await vmServiceConnectUri(_vmServiceWsUri.toString()),
-        _vmServiceWsUri,
-        trackFutures: true,
+      vmService = await vmServiceConnectUriWithFactory<VmServiceWrapper>(
+        _vmServiceWsUri.toString(),
+        vmServiceFactory:
+            ({
+              // ignore: avoid-dynamic, mirrors types of [VmServiceFactory].
+              required Stream<dynamic> /*String|List<int>*/ inStream,
+              required void Function(String message) writeMessage,
+              Log? log,
+              DisposeHandler? disposeHandler,
+              Future? streamClosed,
+              String? wsUri,
+              bool trackFutures = false,
+            }) => VmServiceWrapper.defaultFactory(
+              inStream: inStream,
+              writeMessage: writeMessage,
+              log: log,
+              disposeHandler: disposeHandler,
+              streamClosed: streamClosed,
+              wsUri: wsUri,
+              trackFutures: true,
+            ),
       );
 
       final vmServiceLocal = vmService!;
       vmServiceLocal.onSend.listen((String s) => _debugPrint('==> $s'));
       vmServiceLocal.onReceive.listen((String s) => _debugPrint('<== $s'));
-      await Future.wait(<Future<Success>>[
+      await [
         vmServiceLocal.streamListen(EventStreams.kIsolate),
         vmServiceLocal.streamListen(EventStreams.kDebug),
-      ]);
+      ].wait;
 
       // On hot restarts, the isolate ID we have for the Flutter thread will
       // exit so we need to invalidate our cached ID.
@@ -390,7 +395,8 @@ class FlutterRunTestDriver extends FlutterTestDriver {
 
     // Now await the started event; if it had already happened the future will
     // have already completed.
-    _currentRunningAppId = (await started)['params']['appId'];
+    final Map<String, dynamic> startedParams = (await started)['params'];
+    _currentRunningAppId = startedParams['appId'];
   }
 
   Future<void> hotRestart({bool pause = false}) =>
@@ -403,62 +409,34 @@ class FlutterRunTestDriver extends FlutterTestDriver {
       throw Exception('App has not started yet');
     }
 
-    final dynamic hotReloadResp = await _sendRequest(
-      'app.restart',
-      <String, dynamic>{
-        'appId': _currentRunningAppId,
-        'fullRestart': fullRestart,
-        'pause': pause
-      },
-    );
+    final hotReloadResp = await _sendRequest('app.restart', <String, Object?>{
+      'appId': _currentRunningAppId,
+      'fullRestart': fullRestart,
+      'pause': pause,
+    });
 
-    if (hotReloadResp == null || hotReloadResp['code'] != 0) {
+    if (hotReloadResp == null ||
+        (hotReloadResp as Map<String, Object?>)['code'] != 0) {
       _throwErrorResponse(
         'Hot ${fullRestart ? 'restart' : 'reload'} request failed',
       );
     }
   }
 
-  Future<int> detach() async {
-    final vmServiceLocal = vmService;
-    if (vmServiceLocal != null) {
-      _debugPrint('Closing VM service');
-      await vmServiceLocal.dispose();
-    }
-    if (_currentRunningAppId != null) {
-      _debugPrint('Detaching from app');
-      await Future.any<void>(<Future<void>>[
-        proc.exitCode,
-        _sendRequest(
-          'app.detach',
-          <String, dynamic>{'appId': _currentRunningAppId},
-        ),
-      ]).timeout(
-        quitTimeout,
-        onTimeout: () {
-          _debugPrint('app.detach did not return within $quitTimeout');
-        },
-      );
-      _currentRunningAppId = null;
-    }
-    _debugPrint('Waiting for process to end');
-    return proc.exitCode.timeout(quitTimeout, onTimeout: killGracefully);
-  }
-
   Future<int> stop() async {
     final vmServiceLocal = vmService;
     if (vmServiceLocal != null) {
       _debugPrint('Closing VM service');
+      await Future.delayed(const Duration(milliseconds: 500));
       await vmServiceLocal.dispose();
     }
     if (_currentRunningAppId != null) {
       _debugPrint('Stopping app');
       await Future.any<void>(<Future<void>>[
         proc.exitCode,
-        _sendRequest(
-          'app.stop',
-          <String, dynamic>{'appId': _currentRunningAppId},
-        ),
+        _sendRequest('app.stop', <String, Object?>{
+          'appId': _currentRunningAppId,
+        }),
       ]).timeout(
         quitTimeout,
         onTimeout: () {
@@ -474,25 +452,25 @@ class FlutterRunTestDriver extends FlutterTestDriver {
 
   int id = 1;
 
-  Future<dynamic> _sendRequest(String method, dynamic params) async {
-    final int requestId = id++;
-    final Map<String, dynamic> request = <String, dynamic>{
+  Future<Object?> _sendRequest(String method, Object? params) async {
+    final requestId = id++;
+    final request = <String, Object?>{
       'id': requestId,
       'method': method,
-      'params': params
+      'params': params,
     };
-    final String jsonEncoded = json.encode(<Map<String, dynamic>>[request]);
+    final jsonEncoded = json.encode(<Map<String, Object?>>[request]);
     _debugPrint(jsonEncoded);
 
     // Set up the response future before we send the request to avoid any
     // races. If the method we're calling is app.stop then we tell waitFor not
     // to throw if it sees an app.stop event before the response to this request.
-    final Future<Map<String, dynamic>> responseFuture = waitFor(
+    final responseFuture = waitFor(
       id: requestId,
       ignoreAppStopEvent: method == 'app.stop',
     );
     proc.stdin.writeln(jsonEncoded);
-    final Map<String, dynamic> response = await responseFuture;
+    final response = await responseFuture;
 
     if (response['error'] != null || response['result'] == null) {
       _throwErrorResponse('Unexpected error response');

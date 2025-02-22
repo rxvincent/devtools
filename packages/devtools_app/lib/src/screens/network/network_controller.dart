@@ -3,27 +3,89 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:devtools_app_shared/utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:vm_service/vm_service.dart';
 
-import '../../config_specific/logger/allowed_error.dart';
-import '../../http/http_request_data.dart';
-import '../../http/http_service.dart';
-import '../../primitives/utils.dart';
+import '../../shared/config_specific/import_export/import_export.dart';
+import '../../shared/config_specific/logger/allowed_error.dart';
+import '../../shared/framework/screen_controllers.dart';
 import '../../shared/globals.dart';
-import '../../ui/filter.dart';
-import '../../ui/search.dart';
+import '../../shared/http/http_request_data.dart';
+import '../../shared/http/http_service.dart' as http_service;
+import '../../shared/offline/offline_data.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/ui/filter.dart';
+import '../../shared/ui/search.dart';
+import '../../shared/utils/utils.dart';
+import 'har_network_data.dart';
 import 'network_model.dart';
 import 'network_screen.dart';
 import 'network_service.dart';
+import 'offline_network_data.dart';
 
-class NetworkController
+/// Different types of Network Response which can be used to visualise response
+/// on Response tab
+enum NetworkResponseViewType {
+  auto,
+  text,
+  json;
+
+  @override
+  String toString() {
+    return switch (this) {
+      NetworkResponseViewType.json => 'Json',
+      NetworkResponseViewType.text => 'Text',
+      _ => 'Auto',
+    };
+  }
+}
+
+enum _NetworkTrafficType { http, socket }
+
+class NetworkController extends DevToolsScreenController
     with
         SearchControllerMixin<NetworkRequest>,
-        FilterControllerMixin<NetworkRequest> {
+        FilterControllerMixin<NetworkRequest>,
+        OfflineScreenControllerMixin,
+        AutoDisposeControllerMixin {
   NetworkController() {
     _networkService = NetworkService(this);
+    _currentNetworkRequests = CurrentNetworkRequests();
+    _initHelper();
+    addAutoDisposeListener(
+      _currentNetworkRequests,
+      _filterAndRefreshSearchMatches,
+    );
+    // TODO(https://github.com/flutter/devtools/issues/7727): add support for
+    // persisting network filter.
+    initFilterController();
+  }
+  List<DartIOHttpRequestData>? _httpRequests;
+
+  Future<String?> exportAsHarFile() async {
+    await fetchFullDataBeforeExport();
+    _httpRequests =
+        filteredData.value.whereType<DartIOHttpRequestData>().toList();
+
+    if (_httpRequests.isNullOrEmpty) {
+      debugPrint('No valid request data to export');
+      return '';
+    }
+
+    try {
+      // Build the HAR object
+      final har = HarNetworkData(_httpRequests!);
+      return ExportController().downloadFile(
+        json.encode(har.toJson()),
+        type: ExportFileType.har,
+      );
+    } catch (e) {
+      debugPrint('Exception in export $e');
+    }
+    return null;
   }
 
   static const methodFilterId = 'network-method-filter';
@@ -32,20 +94,53 @@ class NetworkController
 
   static const typeFilterId = 'network-type-filter';
 
-  final filterArgs = {
-    methodFilterId: QueryFilterArgument(keys: ['method', 'm']),
-    statusFilterId: QueryFilterArgument(keys: ['status', 's']),
-    typeFilterId: QueryFilterArgument(keys: ['type', 't']),
+  @override
+  Map<String, QueryFilterArgument<NetworkRequest>> createQueryFilterArgs() => {
+    methodFilterId: QueryFilterArgument<NetworkRequest>(
+      keys: ['method', 'm'],
+      exampleUsages: ['m:get', '-m:put,patch'],
+      dataValueProvider: (request) => request.method,
+      substringMatch: false,
+    ),
+    statusFilterId: QueryFilterArgument<NetworkRequest>(
+      keys: ['status', 's'],
+      exampleUsages: ['s:200', '-s:404'],
+      dataValueProvider: (request) => request.status,
+      substringMatch: false,
+    ),
+    typeFilterId: QueryFilterArgument<NetworkRequest>(
+      keys: ['type', 't'],
+      exampleUsages: ['t:json', '-t:text'],
+      dataValueProvider: (request) => request.type,
+      substringMatch: false,
+    ),
   };
 
+  @override
+  ValueNotifier<String>? get filterTagNotifier => preferences.network.filterTag;
+
   /// Notifies that new Network requests have been processed.
-  ValueListenable<NetworkRequests> get requests => _requests;
+  ValueListenable<List<NetworkRequest>> get requests => _currentNetworkRequests;
 
-  final _requests = ValueNotifier<NetworkRequests>(NetworkRequests());
+  /// Notifies that current response type has been changed
+  ValueListenable<NetworkResponseViewType> get currentResponseViewType =>
+      _currentResponseViewType;
 
-  ValueListenable<NetworkRequest?> get selectedRequest => _selectedRequest;
+  final _currentResponseViewType = ValueNotifier<NetworkResponseViewType>(
+    NetworkResponseViewType.auto,
+  );
 
-  final _selectedRequest = ValueNotifier<NetworkRequest?>(null);
+  /// Change current response type
+  set setResponseViewType(NetworkResponseViewType type) =>
+      _currentResponseViewType.value = type;
+
+  /// Reset drop down to initial state when current network request is changed
+  void resetDropDown() {
+    _currentResponseViewType.value = NetworkResponseViewType.auto;
+  }
+
+  final selectedRequest = ValueNotifier<NetworkRequest?>(null);
+  late CurrentNetworkRequests _currentNetworkRequests;
 
   /// Notifies that the timeline is currently being recorded.
   ValueListenable<bool> get recordingNotifier => _recordingNotifier;
@@ -63,86 +158,80 @@ class NetworkController
   /// timeline events.
   late int _timelineMicrosOffset;
 
-  /// The last timestamp at which HTTP and Socket information was refreshed.
-  int lastRefreshMicros = 0;
+  /// The last timestamp at which Socket information was refreshed.
+  ///
+  /// This timestamp is on the monotonic clock used by the timeline.
+  int lastSocketDataRefreshMicros = 0;
 
-  Timer? _pollingTimer;
+  DebounceTimer? _pollingTimer;
 
   @visibleForTesting
   bool get isPolling => _pollingTimer != null;
 
-  void selectRequest(NetworkRequest? selection) {
-    _selectedRequest.value = selection;
+  void _initHelper() async {
+    if (offlineDataController.showingOfflineData.value) {
+      await maybeLoadOfflineData(
+        NetworkScreen.id,
+        createData: (json) => OfflineNetworkData.fromJson(json),
+        // This ignore is used because the 'data' parameter can have a dynamic type,
+        // which cannot be explicitly typed here due to its dependency on JSON parsing.
+        // ignore: avoid_dynamic_calls
+        shouldLoad: (data) => !data.isEmpty,
+        loadData: (data) => loadOfflineData(data),
+      );
+    }
+    if (serviceConnection.serviceManager.connectedState.value.connected) {
+      await startRecording();
+    }
   }
 
-  void _processHttpProfileRequests({
-    required int timelineMicrosOffset,
-    required List<HttpProfileRequest> httpRequests,
-    required List<NetworkRequest> currentValues,
-    required Map<String, DartIOHttpRequestData> outstandingRequestsMap,
-  }) {
-    for (final request in httpRequests) {
-      final wrapped = DartIOHttpRequestData(
-        timelineMicrosOffset,
-        request,
+  void loadOfflineData(OfflineNetworkData offlineData) {
+    final httpProfileData =
+        offlineData.httpRequestData.mapToHttpProfileRequests;
+    final socketStatsData = offlineData.socketData.mapToSocketStatistics;
+
+    _currentNetworkRequests
+      ..clear()
+      ..updateOrAddAll(
+        requests: httpProfileData,
+        sockets: socketStatsData,
+        timelineMicrosOffset: offlineData.timelineMicrosOffset ?? 0,
       );
-      final id = request.id.toString();
-      if (outstandingRequestsMap.containsKey(id)) {
-        final request = outstandingRequestsMap[id]!;
-        request.merge(wrapped);
-        if (!request.inProgress) {
-          final data =
-              outstandingRequestsMap.remove(id) as DartIOHttpRequestData;
-          data.getFullRequestData().then((value) => _updateData());
-        }
-        continue;
-      } else if (wrapped.inProgress) {
-        outstandingRequestsMap.putIfAbsent(id, () => wrapped);
-      } else {
-        // If the response has completed, send a request for body data.
-        wrapped.getFullRequestData().then((value) => _updateData());
+    _filterAndRefreshSearchMatches();
+
+    // If a selectedRequestId is available, select it in offline mode.
+    if (offlineData.selectedRequestId != null) {
+      final selected = _currentNetworkRequests.getRequest(
+        offlineData.selectedRequestId ?? '',
+      );
+      if (selected != null) {
+        selectedRequest.value = selected;
+        resetDropDown();
       }
-      currentValues.add(wrapped);
     }
   }
 
   @visibleForTesting
-  NetworkRequests processNetworkTrafficHelper(
+  void processNetworkTrafficHelper(
     List<SocketStatistic> sockets,
     List<HttpProfileRequest>? httpRequests,
     int timelineMicrosOffset, {
-    required List<NetworkRequest> currentValues,
-    required List<DartIOHttpRequestData> invalidRequests,
-    required Map<String, DartIOHttpRequestData> outstandingRequestsMap,
+    required CurrentNetworkRequests currentRequests,
   }) {
-    // [currentValues] contains all the current requests we have in the
-    // profiler, which will contain web socket requests if they exist. The new
-    // [sockets] may contain web sockets with the same ids as ones we already
-    // have, so we remove the current web sockets and replace them with updated
-    // data.
-    currentValues.removeWhere((value) => value is WebSocket);
-    for (final socket in sockets) {
-      final webSocket = WebSocket(socket, timelineMicrosOffset);
-      // If we have updated data for the selected web socket, update the value.
-      if (_selectedRequest.value is WebSocket &&
-          (_selectedRequest.value as WebSocket).id == webSocket.id) {
-        _selectedRequest.value = webSocket;
-      }
-      currentValues.add(webSocket);
-    }
-
-    _processHttpProfileRequests(
+    currentRequests.updateOrAddAll(
+      requests: httpRequests!,
+      sockets: sockets,
       timelineMicrosOffset: timelineMicrosOffset,
-      httpRequests: httpRequests!,
-      currentValues: currentValues,
-      outstandingRequestsMap: outstandingRequestsMap,
     );
 
-    return NetworkRequests(
-      requests: currentValues,
-      invalidHttpRequests: invalidRequests,
-      outstandingHttpRequests: outstandingRequestsMap,
-    );
+    // If we have updated data for the selected socket, we need to update
+    // the value.
+    final currentSelectedRequestId = selectedRequest.value?.id;
+    if (currentSelectedRequestId != null) {
+      selectedRequest.value = currentRequests.getRequest(
+        currentSelectedRequestId,
+      );
+    }
   }
 
   void processNetworkTraffic({
@@ -150,25 +239,23 @@ class NetworkController
     required List<HttpProfileRequest>? httpRequests,
   }) {
     // Trigger refresh.
-    _requests.value = processNetworkTrafficHelper(
+    processNetworkTrafficHelper(
       sockets,
       httpRequests,
       _timelineMicrosOffset,
-      currentValues: List.from(requests.value.requests),
-      invalidRequests: [],
-      outstandingRequestsMap: Map.from(requests.value.outstandingHttpRequests),
+      currentRequests: _currentNetworkRequests,
     );
-    _updateData();
+    _filterAndRefreshSearchMatches();
     _updateSelection();
   }
 
   void _updatePollingState(bool recording) {
     if (recording) {
-      _pollingTimer ??= Timer.periodic(
+      _pollingTimer ??= DebounceTimer.periodic(
         // TODO(kenz): look into improving performance by caching more data.
         // Polling less frequently helps performance.
         const Duration(milliseconds: 2000),
-        (_) => _networkService.refreshNetworkData(),
+        _networkService.refreshNetworkData,
       );
     } else {
       _pollingTimer?.cancel();
@@ -177,7 +264,14 @@ class NetworkController
   }
 
   Future<void> startRecording() async {
-    await _startRecording(alreadyRecordingHttp: await recordingHttpTraffic());
+    await _startRecording(
+      alreadyRecordingHttp: await _recordingNetworkTraffic(
+        type: _NetworkTrafficType.http,
+      ),
+      alreadyRecordingSocketData: await _recordingNetworkTraffic(
+        type: _NetworkTrafficType.socket,
+      ),
+    );
   }
 
   /// Enables network traffic recording on all isolates and starts polling for
@@ -187,12 +281,16 @@ class NetworkController
   /// be the beginning of the process (time 0).
   Future<void> _startRecording({
     bool alreadyRecordingHttp = false,
+    bool alreadyRecordingSocketData = false,
   }) async {
     // Cancel existing polling timer before starting recording.
     _updatePollingState(false);
 
-    final timestamp = await _networkService.updateLastRefreshTime(
+    _networkService.updateLastHttpDataRefreshTime(
       alreadyRecordingHttp: alreadyRecordingHttp,
+    );
+    final timestamp = await _networkService.updateLastSocketDataRefreshTime(
+      alreadyRecordingSocketData: alreadyRecordingSocketData,
     );
 
     // Determine the offset that we'll use to calculate the approximate
@@ -204,42 +302,68 @@ class NetworkController
     // fewer flags risks breaking functionality on the timeline view that
     // assumes that all flags are set.
     await allowedError(
-      serviceManager.service!.setVMTimelineFlags(['GC', 'Dart', 'Embedder']),
+      serviceConnection.serviceManager.service!.setVMTimelineFlags([
+        'GC',
+        'Dart',
+        'Embedder',
+      ]),
     );
 
     // TODO(kenz): only call these if http logging and socket profiling are not
     // already enabled. Listen to service manager streams for this info.
-    await Future.wait([
-      HttpService.toggleHttpRequestLogging(true),
+    await [
+      http_service.toggleHttpRequestLogging(true),
       networkService.toggleSocketProfiling(true),
-    ]);
-    togglePolling(true);
+    ].wait;
+    await togglePolling(true);
   }
 
-  void stopRecording() {
-    togglePolling(false);
+  Future<void> stopRecording() async {
+    await togglePolling(false);
   }
 
-  void togglePolling(bool state) {
+  Future<void> togglePolling(bool state) async {
+    if (state) {
+      // Update the last refresh time so that the next polling instance
+      // will only fetch values since we started recording.
+      await updateLastRefreshTime();
+    }
+
     // Do not toggle the vm recording state - just enable or disable polling.
     _updatePollingState(state);
     _recordingNotifier.value = state;
   }
 
-  Future<bool> recordingHttpTraffic() async {
+  /// Updates the last refresh time of the socket and http data refresh times.
+  ///
+  /// This will ensure that future fetches for http and socket requests will at
+  /// most fetch requests since [updateLastRefreshTime] was called.
+  Future<void> updateLastRefreshTime() async {
+    _networkService.updateLastHttpDataRefreshTime();
+    await _networkService.updateLastSocketDataRefreshTime();
+  }
+
+  Future<bool> _recordingNetworkTraffic({
+    required _NetworkTrafficType type,
+  }) async {
     bool enabled = true;
-    final service = serviceManager.service!;
-    await service.forEachIsolate(
-      (isolate) async {
-        final httpFuture = service.httpEnableTimelineLogging(isolate.id!);
-        // The above call won't complete immediately if the isolate is paused,
-        // so give up waiting after 500ms.
-        final state = await timeout(httpFuture, 500);
-        if (state?.enabled != true) {
-          enabled = false;
-        }
-      },
-    );
+    final service = serviceConnection.serviceManager.service!;
+    await service.forEachIsolate((isolate) async {
+      final future = switch (type) {
+        _NetworkTrafficType.http => service.httpEnableTimelineLoggingWrapper(
+          isolate.id!,
+        ),
+        _NetworkTrafficType.socket => service.socketProfilingEnabledWrapper(
+          isolate.id!,
+        ),
+      };
+      // The above call won't complete immediately if the isolate is paused,
+      // so give up waiting after 500ms.
+      final state = await timeout(future, 500);
+      if (state?.enabled != true) {
+        enabled = false;
+      }
+    });
     return enabled;
   }
 
@@ -247,113 +371,195 @@ class NetworkController
   /// last refresh timestamp to the current time.
   Future<void> clear() async {
     await _networkService.clearData();
-    _requests.value = NetworkRequests();
-    resetFilter();
-    _updateData();
+    _currentNetworkRequests.clear();
+    _filterAndRefreshSearchMatches();
     _updateSelection();
   }
 
-  void _updateData() {
+  void _filterAndRefreshSearchMatches() {
     filterData(activeFilter.value);
     refreshSearchMatches();
   }
 
   void _updateSelection() {
-    final selected = _selectedRequest.value;
+    final selected = selectedRequest.value;
     if (selected != null) {
       final requests = filteredData.value;
       if (!requests.contains(selected)) {
-        _selectedRequest.value = null;
+        selectedRequest.value = null;
       }
     }
   }
 
-  // TODO(kenz): search through previous matches when possible.
   @override
-  List<NetworkRequest> matchesForSearch(
-    String search, {
-    bool searchPreviousMatches = false,
-  }) {
-    if (search.isEmpty) return [];
-    final matches = <NetworkRequest>[];
-    final caseInsensitiveSearch = search.toLowerCase();
+  Iterable<NetworkRequest> get currentDataToSearchThrough => filteredData.value;
 
-    final currentRequests = filteredData.value;
-    for (final request in currentRequests) {
-      if (request.uri.toLowerCase().contains(caseInsensitiveSearch)) {
-        matches.add(request);
-        // TODO(kenz): use the value request.isSearchMatch in the network
-        // requests table to improve performance. This will require some
-        // refactoring of FlatTable.
-      }
+  @override
+  void filterData(Filter<NetworkRequest> filter) {
+    super.filterData(filter);
+    serviceConnection.errorBadgeManager.clearErrors(NetworkScreen.id);
+    final queryFilter = filter.queryFilter;
+    if (queryFilter.isEmpty) {
+      _currentNetworkRequests.value.forEach(_checkForError);
+      filteredData
+        ..clear()
+        ..addAll(_currentNetworkRequests.value);
+      return;
     }
-    return matches;
-  }
+    filteredData
+      ..clear()
+      ..addAll(
+        _currentNetworkRequests.value.where((NetworkRequest r) {
+          final filteredOutByQueryFilterArgument = queryFilter
+              .filterArguments
+              .values
+              .any((argument) => !argument.matchesValue(r));
+          if (filteredOutByQueryFilterArgument) return false;
 
-  @override
-  void filterData(Filter<NetworkRequest>? filter) {
-    serviceManager.errorBadgeManager.clearErrors(NetworkScreen.id);
-    final queryFilter = filter?.queryFilter;
-    if (queryFilter == null) {
-      _requests.value.requests.forEach(_checkForError);
-      filteredData
-        ..clear()
-        ..addAll(_requests.value.requests);
-    } else {
-      filteredData
-        ..clear()
-        ..addAll(
-          _requests.value.requests.where((NetworkRequest r) {
-            final methodArg = queryFilter.filterArguments[methodFilterId];
-            if (methodArg != null &&
-                !methodArg.matchesValue(r.method.toLowerCase())) {
-              return false;
-            }
-
-            final statusArg = queryFilter.filterArguments[statusFilterId];
-            if (statusArg != null &&
-                !statusArg.matchesValue(r.status?.toLowerCase())) {
-              return false;
-            }
-
-            final typeArg = queryFilter.filterArguments[typeFilterId];
-            if (typeArg != null &&
-                !typeArg.matchesValue(r.type.toLowerCase())) {
-              return false;
-            }
-
-            if (queryFilter.substrings.isNotEmpty) {
-              for (final substring in queryFilter.substrings) {
-                final caseInsensitiveSubstring = substring.toLowerCase();
-                bool matches(String? stringToMatch) {
-                  if (stringToMatch
-                          ?.toLowerCase()
-                          .contains(caseInsensitiveSubstring) ==
-                      true) {
-                    _checkForError(r);
-                    return true;
-                  }
-                  return false;
+          if (queryFilter.substringExpressions.isNotEmpty) {
+            for (final substring in queryFilter.substringExpressions) {
+              bool matches(String? stringToMatch) {
+                if (stringToMatch?.caseInsensitiveContains(substring) == true) {
+                  _checkForError(r);
+                  return true;
                 }
-
-                if (matches(r.uri)) return true;
-                if (matches(r.method)) return true;
-                if (matches(r.status)) return true;
-                if (matches(r.type)) return true;
+                return false;
               }
-              return false;
+
+              if (matches(r.uri)) return true;
+              if (matches(r.method)) return true;
+              if (matches(r.status)) return true;
+              if (matches(r.type)) return true;
             }
-            _checkForError(r);
-            return true;
-          }).toList(),
-        );
-    }
-    activeFilter.value = filter;
+            return false;
+          }
+          _checkForError(r);
+          return true;
+        }).toList(),
+      );
   }
 
   void _checkForError(NetworkRequest r) {
     if (r.didFail) {
-      serviceManager.errorBadgeManager.incrementBadgeCount(NetworkScreen.id);
+      serviceConnection.errorBadgeManager.incrementBadgeCount(NetworkScreen.id);
     }
+  }
+
+  @override
+  OfflineScreenData prepareOfflineScreenData() {
+    final httpRequestData = <DartIOHttpRequestData>[];
+    final socketData = <Socket>[];
+    for (final request in _currentNetworkRequests.value) {
+      if (request is DartIOHttpRequestData) {
+        httpRequestData.add(request);
+      } else if (request is Socket) {
+        socketData.add(request);
+      }
+    }
+
+    final offlineData = OfflineNetworkData(
+      httpRequestData: httpRequestData,
+      socketData: socketData,
+      selectedRequestId: selectedRequest.value?.id,
+      timelineMicrosOffset: _timelineMicrosOffset,
+    );
+
+    return OfflineScreenData(
+      screenId: NetworkScreen.id,
+      data: offlineData.toJson(),
+    );
+  }
+
+  Future<void> fetchFullDataBeforeExport() =>
+      filteredData.value
+          .whereType<DartIOHttpRequestData>()
+          .map((item) => item.getFullRequestData())
+          .wait;
+}
+
+/// Class for managing the set of all current sockets, and
+/// http profile requests.
+class CurrentNetworkRequests extends ValueNotifier<List<NetworkRequest>> {
+  CurrentNetworkRequests() : super([]);
+
+  final _requestsById = <String, NetworkRequest>{};
+
+  NetworkRequest? getRequest(String id) => _requestsById[id];
+
+  /// Update or add all [requests] and [sockets] to the current requests.
+  ///
+  /// If the entry already exists then it will be modified in place, otherwise
+  /// a new [HttpProfileRequest] will be added to the end of the requests lists.
+  ///
+  /// [notifyListeners] will only be called once all [requests] and [sockets]
+  /// have be updated or added.
+  void updateOrAddAll({
+    required List<HttpProfileRequest> requests,
+    required List<SocketStatistic> sockets,
+    required int timelineMicrosOffset,
+  }) {
+    _updateOrAddRequests(requests);
+    _updateSocketProfiles(sockets, timelineMicrosOffset);
+    notifyListeners();
+  }
+
+  /// Update or add the [request] to the [requests] depending on whether or not
+  /// its [request.id] already exists in the list.
+  ///
+  void _updateOrAddRequests(List<HttpProfileRequest> requests) {
+    for (int i = 0; i < requests.length; i++) {
+      final request = requests[i];
+      _updateOrAddRequest(request);
+    }
+  }
+
+  void _updateOrAddRequest(HttpProfileRequest request) {
+    final wrapped = DartIOHttpRequestData(
+      request,
+      requestFullDataFromVmService: false,
+    );
+    if (!_requestsById.containsKey(request.id)) {
+      _requestsById[wrapped.id] = wrapped;
+      value.add(wrapped);
+    } else {
+      // If we override an entry that is not a DartIOHttpRequestData then that means
+      // the ids of the requestMapping entries may collide with other types
+      // of requests.
+      assert(_requestsById[request.id] is DartIOHttpRequestData);
+      (_requestsById[request.id] as DartIOHttpRequestData).merge(wrapped);
+    }
+  }
+
+  void _updateSocketProfiles(
+    List<SocketStatistic> sockets,
+    int timelineMicrosOffset,
+  ) {
+    for (final socketStats in sockets) {
+      final socket = Socket(socketStats, timelineMicrosOffset);
+
+      if (_requestsById.containsKey(socket.id)) {
+        final existingRequest = _requestsById[socket.id];
+        if (existingRequest is Socket) {
+          existingRequest.update(socket);
+        } else {
+          // If we override an entry that is not a Socket then that means
+          // the ids of the requestMapping entries may collide with other types
+          // of requests.
+          assert(existingRequest is Socket);
+        }
+      } else {
+        value.add(socket);
+        // The new [sockets] may contain sockets with the same ids as ones we
+        // already have, so we remove the current sockets and replace them with
+        // updated data.
+        _requestsById[socket.id] = socket;
+      }
+    }
+  }
+
+  void clear() {
+    _requestsById.clear();
+    value = [];
+    notifyListeners();
   }
 }

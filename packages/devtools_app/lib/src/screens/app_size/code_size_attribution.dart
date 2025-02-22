@@ -1,25 +1,25 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Flutter Authors
 // Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// found in the LICENSE file or at https://developers.google.com/open-source/licenses/bsd.
 
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter/material.dart';
 import 'package:vm_snapshot_analysis/precompiler_trace.dart';
 import 'package:vm_snapshot_analysis/program_info.dart';
 
-import '../../primitives/trees.dart';
-import '../../primitives/utils.dart';
-import '../../shared/common_widgets.dart';
-import '../../shared/table.dart';
-import '../../shared/table_data.dart';
-import '../../shared/theme.dart';
+import '../../shared/primitives/trees.dart';
+import '../../shared/primitives/utils.dart';
+import '../../shared/table/table.dart';
+import '../../shared/table/table_data.dart';
+import '../../shared/ui/common_widgets.dart';
 
 class CallGraphWithDominators extends StatefulWidget {
-  const CallGraphWithDominators({required this.callGraphRoot});
+  const CallGraphWithDominators({super.key, required this.callGraphRoot});
 
   final CallGraphNode callGraphRoot;
 
   @override
-  _CallGraphWithDominatorsState createState() =>
+  State<CallGraphWithDominators> createState() =>
       _CallGraphWithDominatorsState();
 }
 
@@ -31,16 +31,18 @@ class _CallGraphWithDominatorsState extends State<CallGraphWithDominators> {
   @override
   void initState() {
     super.initState();
-    dominatorTreeRoot =
-        DominatorTreeNode.from(widget.callGraphRoot.dominatorRoot);
+    dominatorTreeRoot = DominatorTreeNode.from(
+      widget.callGraphRoot.dominatorRoot,
+    );
   }
 
   @override
   void didUpdateWidget(covariant CallGraphWithDominators oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.callGraphRoot != widget.callGraphRoot) {
-      dominatorTreeRoot =
-          DominatorTreeNode.from(widget.callGraphRoot.dominatorRoot);
+      dominatorTreeRoot = DominatorTreeNode.from(
+        widget.callGraphRoot.dominatorRoot,
+      );
     }
   }
 
@@ -50,24 +52,25 @@ class _CallGraphWithDominatorsState extends State<CallGraphWithDominators> {
       children: [
         AreaPaneHeader(
           title: Text(showCallGraph ? 'Call Graph' : 'Dominator Tree'),
-          needsTopBorder: false,
-          needsBottomBorder: false,
-          needsLeftBorder: true,
+          includeTopBorder: false,
+          roundedTopBorder: false,
           actions: [
             const Text('Show call graph'),
-            Switch(
+            DevToolsSwitch(
+              padding: const EdgeInsets.only(left: denseSpacing),
               value: showCallGraph,
               onChanged: _toggleShowCallGraph,
             ),
           ],
         ),
         Expanded(
-          child: showCallGraph
-              ? CallGraphView(node: widget.callGraphRoot)
-              : DominatorTree(
-                  dominatorTreeRoot: dominatorTreeRoot,
-                  selectedNode: widget.callGraphRoot,
-                ),
+          child:
+              showCallGraph
+                  ? CallGraphView(node: widget.callGraphRoot)
+                  : DominatorTree(
+                    dominatorTreeRoot: dominatorTreeRoot,
+                    selectedNode: widget.callGraphRoot,
+                  ),
         ),
       ],
     );
@@ -81,22 +84,15 @@ class _CallGraphWithDominatorsState extends State<CallGraphWithDominators> {
 }
 
 class CallGraphView extends StatefulWidget {
-  const CallGraphView({required this.node});
-
-  static const Key fromTableKey = Key('CallGraphView - From table');
-  static const Key toTableKey = Key('CallGraphView - To table');
+  const CallGraphView({super.key, required this.node});
 
   final CallGraphNode node;
 
   @override
-  _CallGraphViewState createState() => _CallGraphViewState();
+  State<CallGraphView> createState() => _CallGraphViewState();
 }
 
 class _CallGraphViewState extends State<CallGraphView> {
-  final _fromColumn = FromColumn();
-
-  final _toColumn = ToColumn();
-
   late CallGraphNode selectedNode;
 
   @override
@@ -115,6 +111,40 @@ class _CallGraphViewState extends State<CallGraphView> {
 
   @override
   Widget build(BuildContext context) {
+    // Padding to prevent the node title and arrows from overlapping the column
+    // headers.
+    const columnHeaderPadding = 50.0;
+    final mainNode = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: columnHeaderPadding),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: densePadding),
+            child: Icon(Icons.arrow_forward),
+          ),
+          Flexible(
+            child: DevToolsTooltip(
+              message: selectedNode.data.toString(),
+              child: Padding(
+                padding: const EdgeInsets.all(densePadding),
+                child: Text(
+                  selectedNode.display,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: densePadding),
+            child: Icon(Icons.arrow_forward),
+          ),
+        ],
+      ),
+    );
+
     return LayoutBuilder(
       builder: (context, constraints) {
         return Stack(
@@ -124,22 +154,26 @@ class _CallGraphViewState extends State<CallGraphView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Flexible(
-                  child: _buildFromTable(),
+                  child: _CallGraphTable(
+                    tableType: _CallGraphTableType.from,
+                    selectedNode: selectedNode,
+                    onNodeSelected: _selectMainNode,
+                  ),
                 ),
-                Container(
-                  height: constraints.maxHeight,
-                  width: densePadding,
-                  color: Theme.of(context).titleSolidBackgroundColor,
-                ),
+                const SizedBox(width: densePadding),
                 Flexible(
-                  child: _buildToTable(),
+                  child: _CallGraphTable(
+                    tableType: _CallGraphTableType.to,
+                    selectedNode: selectedNode,
+                    onNodeSelected: _selectMainNode,
+                  ),
                 ),
               ],
             ),
             Positioned(
-              top: 0,
+              top: densePadding,
               width: constraints.maxWidth,
-              child: _buildMainNode(),
+              child: mainNode,
             ),
           ],
         );
@@ -147,60 +181,63 @@ class _CallGraphViewState extends State<CallGraphView> {
     );
   }
 
-  Widget _buildFromTable() {
-    return FlatTable<CallGraphNode>(
-      key: CallGraphView.fromTableKey,
-      columns: [_fromColumn],
-      data: selectedNode.pred,
-      keyFactory: (CallGraphNode node) => ValueKey<CallGraphNode>(node),
-      onItemSelected: _selectMainNode,
-      sortColumn: _fromColumn,
-      sortDirection: SortDirection.descending,
-    );
-  }
-
-  Widget _buildToTable() {
-    return FlatTable<CallGraphNode>(
-      key: CallGraphView.toTableKey,
-      columns: [_toColumn],
-      data: selectedNode.succ,
-      keyFactory: (CallGraphNode node) => ValueKey<CallGraphNode>(node),
-      onItemSelected: _selectMainNode,
-      sortColumn: _toColumn,
-      sortDirection: SortDirection.descending,
-    );
-  }
-
-  Widget _buildMainNode() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: densePadding),
-          child: Icon(Icons.arrow_forward),
-        ),
-        DevToolsTooltip(
-          message: selectedNode.data.toString(),
-          child: Container(
-            padding: const EdgeInsets.all(densePadding),
-            child: Text(
-              selectedNode.display,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: densePadding),
-          child: Icon(Icons.arrow_forward),
-        ),
-      ],
-    );
-  }
-
-  void _selectMainNode(CallGraphNode node) {
+  // TODO(kenz): store the selected node in a controller and pass the notifier
+  // to the tables instead of storing the [selectedNode] value in the state
+  // class.
+  void _selectMainNode(CallGraphNode? node) {
     setState(() {
-      selectedNode = node;
+      selectedNode = node!;
     });
+  }
+}
+
+enum _CallGraphTableType {
+  from,
+  to;
+
+  String get dataKey {
+    switch (this) {
+      case from:
+        return 'call-graph-from';
+      case to:
+        return 'call-graph-to';
+    }
+  }
+}
+
+class _CallGraphTable extends StatelessWidget {
+  const _CallGraphTable({
+    required this.tableType,
+    required this.selectedNode,
+    required this.onNodeSelected,
+  });
+
+  static final _toColumn = ToColumn();
+  static final _fromColumn = FromColumn();
+
+  final _CallGraphTableType tableType;
+
+  final CallGraphNode selectedNode;
+
+  final void Function(CallGraphNode? node) onNodeSelected;
+
+  ColumnData<CallGraphNode> get tableColumn =>
+      tableType == _CallGraphTableType.from ? _fromColumn : _toColumn;
+
+  @override
+  Widget build(BuildContext context) {
+    return FlatTable<CallGraphNode>(
+      keyFactory: (CallGraphNode node) => ValueKey<CallGraphNode>(node),
+      data:
+          tableType == _CallGraphTableType.from
+              ? selectedNode.pred
+              : selectedNode.succ,
+      dataKey: tableType.dataKey,
+      columns: [tableColumn],
+      onItemSelected: onNodeSelected,
+      defaultSortColumn: tableColumn,
+      defaultSortDirection: SortDirection.descending,
+    );
   }
 }
 
@@ -218,11 +255,15 @@ class ToColumn extends ColumnData<CallGraphNode> {
   ColumnAlignment get alignment => ColumnAlignment.right;
 
   @override
+  TextAlign get headerAlignment => TextAlign.right;
+
+  @override
   String? getValue(CallGraphNode dataObject) => dataObject.display;
 }
 
 class DominatorTree extends StatelessWidget {
   DominatorTree({
+    super.key,
     required this.dominatorTreeRoot,
     required this.selectedNode,
   });
@@ -242,11 +283,12 @@ class DominatorTree extends StatelessWidget {
     return TreeTable<DominatorTreeNode>(
       key: dominatorTreeTableKey,
       dataRoots: [dominatorTreeRoot!],
+      dataKey: 'dominator-tree',
+      keyFactory: (node) => PageStorageKey<String>('${node.callGraphNode.id}'),
       columns: [_packageColumn],
       treeColumn: _packageColumn,
-      keyFactory: (node) => PageStorageKey<String>('${node.callGraphNode.id}'),
-      sortColumn: _packageColumn,
-      sortDirection: SortDirection.descending,
+      defaultSortColumn: _packageColumn,
+      defaultSortDirection: SortDirection.descending,
       autoExpandRoots: true,
     );
   }
@@ -274,7 +316,9 @@ class _PackageColumn extends TreeColumnData<DominatorTreeNode> {
 extension CallGraphNodeDisplay on CallGraphNode {
   String get display {
     final displayText =
-        data is ProgramInfoNode ? data.qualifiedName : data.toString();
+        data is ProgramInfoNode
+            ? (data as ProgramInfoNode).qualifiedName
+            : data.toString();
     if (displayText == '@shared') {
       // Special case '@shared' because this is the name of the call graph root,
       // and '@root' has a more intuitive meaning.
@@ -297,7 +341,7 @@ class DominatorTreeNode extends TreeNode<DominatorTreeNode> {
 
   factory DominatorTreeNode.from(CallGraphNode cgNode) {
     final domNode = DominatorTreeNode._(cgNode);
-    for (var dominated in cgNode.dominated) {
+    for (final dominated in cgNode.dominated) {
       domNode.addChild(DominatorTreeNode.from(dominated));
     }
     return domNode;
